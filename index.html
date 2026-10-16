@@ -42,7 +42,14 @@
   #pickResults li{padding:8px 9px;border-radius:7px;font-size:13px;cursor:pointer;line-height:1.45}
   #pickResults li:hover,#pickResults li:focus{background:#232a38;outline:none}
   #pickResults li small{color:var(--muted);display:block}
-  #map circle.pt{fill:var(--accent);stroke:#000;stroke-width:1.5;vector-effect:non-scaling-stroke}
+  #map .world,#map .sub,#map .hl,#map .selline{pointer-events:none}
+  #map image.photo{cursor:pointer}
+  #map image.photo.sel{cursor:move}
+  #map .selline path{fill:none;stroke:var(--accent);stroke-width:3;vector-effect:non-scaling-stroke}
+  #photoCtl{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:none;gap:6px;align-items:center;background:rgba(20,24,33,.92);border:1px solid var(--accent);border-radius:999px;padding:5px 6px 5px 14px}
+  #photoCtl span{font-size:12px;color:var(--muted);margin-right:4px;white-space:nowrap}
+  #photoCtl .btn{padding:6px 11px;font-size:13px;border-radius:999px}
+  #mapTip{position:absolute;left:14px;bottom:14px;font-size:12px;color:var(--muted);background:rgba(0,0,0,.55);padding:4px 10px;border-radius:999px;pointer-events:none;display:none}
   main{padding:18px 20px 40px}
   .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
   .bar label{font-size:13px;color:var(--muted)}
@@ -102,6 +109,14 @@
     <ul id="pickResults"></ul>
     <div class="sub">또는 지도를 확대해서 찍은 위치를 직접 클릭하세요. (Esc 취소)</div>
   </div>
+  <div id="mapTip">사진을 누르면 위치를 조정할 수 있어요</div>
+  <div id="photoCtl">
+    <span>드래그로 이동</span>
+    <button class="btn" id="phZin" title="사진 확대">＋</button>
+    <button class="btn" id="phZout" title="사진 축소">－</button>
+    <button class="btn" id="phReset">초기화</button>
+    <button class="btn primary" id="phDone">완료</button>
+  </div>
   <div class="mapCtl">
     <button class="btn" id="zin" title="확대">+</button>
     <button class="btn" id="zout" title="축소">−</button>
@@ -160,10 +175,16 @@ const S = { world:[], prov:[], muni:[], korea:null, photos:[], view:null, proj:n
 let uid = 0;
 const $ = id => document.getElementById(id);
 const svg = d3.select('#map'), root = d3.select('#root');
-const zoom = d3.zoom().scaleExtent([0.05, 400]).on('zoom', e => {
-  root.attr('transform', e.transform);
-  root.selectAll('circle.pt').attr('r', 4 / e.transform.k);
-});
+const zoom = d3.zoom().scaleExtent([0.05, 400])
+  // 선택된 사진 위에서 한 손가락/마우스로 끌면 사진 이동, 그 외에는 지도 이동·확대
+  .filter(ev => {
+    if(ev.ctrlKey && ev.type !== 'wheel') return false;
+    if(ev.button) return false;
+    if(ev.type === 'wheel') return true;
+    if(ev.touches && ev.touches.length > 1) return true;
+    return !(ev.target && ev.target.classList && ev.target.classList.contains('sel'));
+  })
+  .on('zoom', e => root.attr('transform', e.transform));
 svg.call(zoom).on('dblclick.zoom', null);
 
 /* ============================== 지도 데이터 ============================== */
@@ -366,18 +387,61 @@ function render(resetZoom = true){
     const id = 'clip' + i;
     defs.append('clipPath').attr('id', id).append('path').attr('d', path(fl.feature));
     const [[x0, y0], [x1, y1]] = path.bounds(fl.feature);
-    root.append('image').attr('href', fl.photo.url).attr('x', x0).attr('y', y0)
-      .attr('width', Math.max(1, x1 - x0)).attr('height', Math.max(1, y1 - y0))
-      .attr('preserveAspectRatio', 'xMidYMid slice').attr('clip-path', `url(#${id})`);
+    const box = [x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)];
+    const r = placedRect(fl.photo, box);
+    root.append('image').datum({ photo: fl.photo, box, feature: fl.feature })
+      .attr('class', 'photo' + (S.sel === fl.photo.id ? ' sel' : ''))
+      .attr('href', fl.photo.url).attr('x', r[0]).attr('y', r[1]).attr('width', r[2]).attr('height', r[3])
+      .attr('preserveAspectRatio', 'none').attr('clip-path', `url(#${id})`);
   });
+  if(S.sel && !S.view.fills.some(fl => fl.photo.id === S.sel)) S.sel = null;
   root.append('g').attr('class', 'world').selectAll('path').data(S.world).join('path').attr('d', path);
   if(S.view.sub.length) root.append('g').attr('class', 'sub').selectAll('path').data(S.view.sub).join('path').attr('d', path);
   root.append('g').attr('class', 'hl').selectAll('path').data(S.view.fills.map(f => f.feature)).join('path').attr('d', path);
-  const k = d3.zoomTransform($('map')).k;
-  root.append('g').selectAll('circle').data(S.photos.filter(p => p.lonlat)).join('circle').attr('class', 'pt')
-    .attr('cx', p => proj(p.lonlat)[0]).attr('cy', p => proj(p.lonlat)[1]).attr('r', 4 / (resetZoom ? 1 : k));
+  const selFill = S.view.fills.find(fl => fl.photo.id === S.sel);
+  if(selFill) root.append('g').attr('class', 'selline').append('path').attr('d', path(selFill.feature));
+  root.selectAll('image.photo').call(photoDrag).on('click', (ev, d) => { ev.stopPropagation(); if(S.sel !== d.photo.id) selectPhoto(d.photo.id); });
+  $('photoCtl').style.display = selFill ? 'flex' : 'none';
+  $('mapTip').style.display = (!selFill && S.view.fills.length && !S.pick) ? 'block' : 'none';
   if(resetZoom) svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
 }
+/* ---------- 지도 위 사진 위치/크기 조정 ---------- */
+// p.off: 영역 중심에서 사진을 옮긴 정도(사진 크기 대비 비율), p.zoom: 영역을 꽉 채운 크기 대비 배율
+function placedRect(p, [x, y, w, h], extraZoom = 1){
+  const iw = p.iw || w, ih = p.ih || h;
+  const z = (p.zoom || 1) * extraZoom;
+  const s = Math.max(w / iw, h / ih) * z, dw = iw * s, dh = ih * s;
+  const off = clampOff(p.off || { x: 0, y: 0 }, w, h, dw, dh);
+  return [x + (w - dw) / 2 + off.x * dw, y + (h - dh) / 2 + off.y * dh, dw, dh];
+}
+// 사진이 영역(외곽 사각형) 밖으로 빠져 빈 공간이 생기지 않도록 이동 범위 제한
+function clampOff(o, w, h, dw, dh){
+  const mx = Math.max(0, (1 - w / dw) / 2), my = Math.max(0, (1 - h / dh) / 2);
+  return { x: Math.max(-mx, Math.min(mx, o.x)), y: Math.max(-my, Math.min(my, o.y)) };
+}
+function updatePhotoEl(el){
+  const d = d3.select(el).datum(), r = placedRect(d.photo, d.box);
+  d3.select(el).attr('x', r[0]).attr('y', r[1]).attr('width', r[2]).attr('height', r[3]);
+}
+const photoDrag = d3.drag()
+  .filter(ev => !ev.button && ev.currentTarget.classList.contains('sel') && !(ev.touches && ev.touches.length > 1))
+  .on('drag', function(ev, d){
+    const p = d.photo, r = placedRect(p, d.box);
+    const o = p.off || { x: 0, y: 0 };
+    p.off = clampOff({ x: o.x + ev.dx / r[2], y: o.y + ev.dy / r[3] }, d.box[2], d.box[3], r[2], r[3]);
+    updatePhotoEl(this);
+  });
+function selectPhoto(id){ S.sel = id; render(false); }
+function changeSelZoom(f){
+  const p = S.photos.find(x => x.id === S.sel); if(!p) return;
+  p.zoom = Math.max(1, Math.min(5, (p.zoom || 1) * f));
+  root.selectAll('image.photo.sel').each(function(){ updatePhotoEl(this); });
+}
+$('phZin').onclick = () => changeSelZoom(1.2);
+$('phZout').onclick = () => changeSelZoom(1 / 1.2);
+$('phReset').onclick = () => { const p = S.photos.find(x => x.id === S.sel); if(p){ p.off = { x: 0, y: 0 }; p.zoom = 1; } render(false); };
+$('phDone').onclick = () => { S.sel = null; render(false); };
+
 async function refresh(){
   await refineChains();
   render(); renderList();
@@ -433,7 +497,8 @@ $('pickQ').onkeydown = e => { if(e.key === 'Enter'){ e.preventDefault(); searchP
 $('pickCancel').onclick = () => setPick(null);
 
 svg.on('click', ev => {
-  if(!S.pick || !S.proj || ev.defaultPrevented) return;
+  if(!S.pick){ if(S.sel && !ev.defaultPrevented){ S.sel = null; render(false); } return; }
+  if(!S.proj || ev.defaultPrevented) return;
   const t = d3.zoomTransform($('map'));
   const ll = S.proj.invert(t.invert(d3.pointer(ev, $('map'))));
   const id = S.pick; setPick(null);
@@ -466,11 +531,13 @@ function loadHeic2any(){
 }
 async function displayURL(file){
   const url = URL.createObjectURL(file);
-  try { const im = new Image(); im.src = url; await im.decode(); return url; }
+  try { const im = new Image(); im.src = url; await im.decode(); return { url, iw: im.naturalWidth, ih: im.naturalHeight }; }
   catch {
     URL.revokeObjectURL(url);
     const conv = await (await loadHeic2any())({ blob: file, toType: 'image/jpeg', quality: 0.9 });
-    return URL.createObjectURL(Array.isArray(conv) ? conv[0] : conv);
+    const u2 = URL.createObjectURL(Array.isArray(conv) ? conv[0] : conv);
+    const im2 = new Image(); im2.src = u2; await im2.decode();
+    return { url: u2, iw: im2.naturalWidth, ih: im2.naturalHeight };
   }
 }
 
@@ -514,9 +581,10 @@ async function handleFiles(files){
     const time = (meta && (meta.DateTimeOriginal || meta.CreateDate)) || new Date(file.lastModified);
     const lonlat = gps && isFinite(gps.longitude) && isFinite(gps.latitude) && !(gps.longitude === 0 && gps.latitude === 0)
       ? [gps.longitude, gps.latitude] : null;
-    let url;
-    try { url = await displayURL(file); } catch(e){ console.warn('표시 불가', file.name, e); continue; }
-    S.photos.push({ id: ++uid, file, url, time: new Date(time), lonlat, chain: [], caption: '' });
+    let disp;
+    try { disp = await displayURL(file); } catch(e){ console.warn('표시 불가', file.name, e); continue; }
+    S.photos.push({ id: ++uid, file, url: disp.url, iw: disp.iw, ih: disp.ih, off: { x: 0, y: 0 }, zoom: 1,
+      time: new Date(time), lonlat, chain: [], caption: '' });
     added++;
     if(!lonlat){ noGps++; if(meta && (meta.Make || meta.Model || meta.DateTimeOriginal)) exifNoGps++; }
   }
@@ -643,6 +711,18 @@ function drawCover(ctx, img, x, y, w, h, z = 1, alpha = 1){
   ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
   ctx.restore();
 }
+// clip 사각형 안에 사진을 imgRect 위치·크기로 그리기
+function drawInRect(ctx, img, clip, r, alpha = 1){
+  if(clip[2] < 1 || clip[3] < 1) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.beginPath(); ctx.rect(...clip); ctx.clip();
+  ctx.drawImage(img, ...r);
+  ctx.restore();
+}
+function coverRect(img, [x, y, w, h], z = 1){
+  const s = Math.max(w / img.width, h / img.height) * z, dw = img.width * s, dh = img.height * s;
+  return [x + (w - dw) / 2, y + (h - dh) / 2, dw, dh];
+}
 function buildStaticMap(proj, imgs){
   const c = document.createElement('canvas'); c.width = VW; c.height = VH;
   const ctx = c.getContext('2d'), path = d3.geoPath(proj, ctx);
@@ -651,7 +731,7 @@ function buildStaticMap(proj, imgs){
     const img = imgs.get(fl.photo.id); if(!img) continue;
     const [[x0, y0], [x1, y1]] = d3.geoPath(proj).bounds(fl.feature);
     ctx.save(); ctx.beginPath(); path(fl.feature); ctx.clip();
-    drawCover(ctx, img, x0, y0, x1 - x0, y1 - y0);
+    ctx.drawImage(img, ...placedRect(fl.photo, [x0, y0, x1 - x0, y1 - y0]));   // 지도에서 조정한 위치·크기 그대로
     ctx.restore();
   }
   const stroke = (feats, color, lw) => { ctx.beginPath(); feats.forEach(f => path(f)); ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke(); };
@@ -767,6 +847,8 @@ async function produce(){
     x0 = Math.max(-VW, x0); y0 = Math.max(-VH, y0); x1 = Math.min(2 * VW, x1); y1 = Math.min(2 * VH, y1);
     return [x0, y0, Math.max(4, x1 - x0), Math.max(4, y1 - y0)];
   };
+  const rawBox = p => { const [[x0, y0], [x1, y1]] = boundsPath.bounds(p.region); return [x0, y0, x1 - x0, y1 - y0]; };
+  const startRect = p => p.region ? placedRect(p, rawBox(p)) : coverRect(imgs.get(p.id), regionRect(p));
   const segs = []; let t = 0;
   const add = (type, dur, p) => { segs.push({ type, start: t, dur, p }); t += dur; };
   add('map', T_INTRO);
@@ -815,19 +897,19 @@ async function produce(){
       const r = regionRect(p);
       if(p.region){
         ctx.save(); ctx.beginPath(); d3.geoPath(proj, ctx)(p.region); ctx.clip();
-        drawCover(ctx, img, ...r); ctx.restore();
+        ctx.drawImage(img, ...startRect(p)); ctx.restore();
         ctx.beginPath(); d3.geoPath(proj, ctx)(p.region);
         ctx.strokeStyle = `rgba(255,213,74,${0.5 + 0.5 * Math.sin(u * Math.PI * 2)})`; ctx.lineWidth = 3; ctx.stroke();
       } else drawCover(ctx, img, ...r, 1, ease(u));
     } else if(s.type === 'in'){
       const e = ease(u);
-      drawCover(ctx, img, ...lerpRect(regionRect(p), full, e), 1, Math.min(1, 0.4 + u * 1.5));
+      drawInRect(ctx, img, lerpRect(regionRect(p), full, e), lerpRect(startRect(p), coverRect(img, full), e), Math.min(1, 0.4 + u * 1.5));
     } else if(s.type === 'narr'){
       drawCover(ctx, img, ...full, 1 + KB_ZOOM * u);
       drawSubtitle(ctx, p.caption);
     } else if(s.type === 'out'){
       const e = ease(u);
-      drawCover(ctx, img, ...lerpRect(full, regionRect(p), e), 1 + KB_ZOOM * (1 - e), 1 - u * u);
+      drawInRect(ctx, img, lerpRect(full, regionRect(p), e), lerpRect(coverRect(img, full, 1 + KB_ZOOM), startRect(p), e), 1 - u * u);
     }
   };
 
