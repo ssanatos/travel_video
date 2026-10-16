@@ -75,10 +75,10 @@
 <body>
 <header>
   <h1>포토 월드맵<span>사진 위치로 지도를 채우고 영상으로 만들기</span></h1>
-  <input id="file" type="file" accept="image/*,.heic,.heif" multiple hidden>
+  <input id="file" type="file" accept="image/*,.heic,.heif,.zip" multiple hidden>
   <!-- accept 제한 없는 입력: 폰에서 갤러리 대신 '파일' 선택기가 열려 위치 정보가 보존됨 -->
   <input id="file2" type="file" multiple hidden>
-  <button class="btn mobileOnly" id="uploadBtn2">파일에서 선택 (위치 보존)</button>
+  <button class="btn mobileOnly" id="uploadBtn2">파일·zip에서 선택</button>
   <button class="btn primary" id="uploadBtn">사진 업로드</button>
 </header>
 
@@ -464,39 +464,72 @@ async function displayURL(file){
   }
 }
 
+// zip 풀기 (안드로이드: 사진 파일은 위치가 지워지지만 zip 안의 사진은 원본 그대로 전달됨)
+let fflateLib = null;
+function loadFflate(){
+  return fflateLib || (fflateLib = new Promise((ok, no) => {
+    const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js';
+    sc.onload = () => ok(window.fflate); sc.onerror = no; document.head.appendChild(sc);
+  }));
+}
+const IMG_RE = /\.(jpe?g|png|heic|heif|webp|tiff?)$/i;
+const MIME = { jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png', heic:'image/heic', heif:'image/heif', webp:'image/webp', tif:'image/tiff', tiff:'image/tiff' };
+async function expandZips(files){
+  const out = [];
+  for(const f of files){
+    if(!/\.zip$/i.test(f.name) && f.type !== 'application/zip' && f.type !== 'application/x-zip-compressed'){ out.push(f); continue; }
+    setStatus(`${f.name} 압축 푸는 중…`);
+    const ff = await loadFflate();
+    const entries = ff.unzipSync(new Uint8Array(await f.arrayBuffer()), {
+      filter: e => IMG_RE.test(e.name) && !/(^|\/)(__MACOSX|\.)/.test(e.name)
+    });
+    for(const [name, data] of Object.entries(entries)){
+      const base = name.split('/').pop(), ext = base.split('.').pop().toLowerCase();
+      out.push(new File([data], base, { type: MIME[ext] || 'application/octet-stream', lastModified: f.lastModified }));
+    }
+  }
+  return out;
+}
+
 async function handleFiles(files){
-  files = files.filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp|tiff?)$/i.test(f.name));
+  try { files = await expandZips(files); } catch(e){ console.error(e); setStatus('zip 파일을 풀지 못했습니다: ' + e.message); return; }
+  files = files.filter(f => f.type.startsWith('image/') || IMG_RE.test(f.name));
   if(!files.length){ setStatus('사진 파일이 없습니다.'); return; }
   setStatus(`사진 ${files.length}장 읽는 중…`);
-  let added = 0, noGps = 0;
+  let added = 0, noGps = 0, exifNoGps = 0;
   for(const file of files){
     let gps = null, meta = null;
     try { gps = await exifr.gps(file); } catch {}
-    try { meta = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate']); } catch {}
+    try { meta = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate', 'Make', 'Model']); } catch {}
     const time = (meta && (meta.DateTimeOriginal || meta.CreateDate)) || new Date(file.lastModified);
     const lonlat = gps && isFinite(gps.longitude) && isFinite(gps.latitude) && !(gps.longitude === 0 && gps.latitude === 0)
       ? [gps.longitude, gps.latitude] : null;
     let url;
     try { url = await displayURL(file); } catch(e){ console.warn('표시 불가', file.name, e); continue; }
     S.photos.push({ id: ++uid, file, url, time: new Date(time), lonlat, chain: [], caption: '' });
-    added++; if(!lonlat) noGps++;
+    added++;
+    if(!lonlat){ noGps++; if(meta && (meta.Make || meta.Model || meta.DateTimeOriginal)) exifNoGps++; }
   }
   S.photos.sort((a, b) => a.time - b.time);
   S.photos.forEach(p => p.chain = []);        // 사진 구성이 바뀌면 영역을 처음부터 다시 배정
   await refresh();
-  if(noGps && isMobile) showTip(noGps, added);
+  if(noGps && isMobile) showTip(noGps, added, exifNoGps);
 }
 
-function showTip(noGps, added){
+function showTip(noGps, added, exifNoGps){
   const steps = isIOS
     ? `<b>아이폰</b>: '사진 업로드'로 사진 보관함을 열었다면, 선택 화면 위쪽 <b>'옵션'</b>을 눌러 <b>'위치'를 켠 뒤</b> 다시 선택하세요.
-       또는 <b>'파일에서 선택'</b> → '파일 선택' → 파일 앱의 사진을 고르면 위치가 유지됩니다.`
-    : `<b>안드로이드</b>: '사진 업로드'로 열리는 사진 선택기는 위치 정보를 지워서 보냅니다.
-       <b>'파일에서 선택 (위치 보존)'</b> 버튼을 누르고, 열린 화면에서 <b>'갤러리/포토'가 아니라 '파일'(내 파일·이미지 폴더·DCIM/Camera)</b>로 들어가 사진을 고르세요.`;
+       또는 <b>'파일·zip에서 선택'</b> → '파일 선택' → 파일 앱의 사진을 고르면 위치가 유지됩니다.`
+    : `<b>안드로이드</b>는 브라우저가 사진 파일을 읽을 때 시스템이 위치를 지웁니다. <b>zip으로 묶어서 올리면</b> 원본 그대로 전달됩니다.<br>
+       ① <b>내 파일</b> 앱 → 이미지(또는 DCIM › Camera)<br>
+       ② 사진을 길게 눌러 여러 장 선택 → <b>더보기(⋮) → 압축</b><br>
+       ③ 여기서 <b>'파일·zip에서 선택'</b> → 만들어진 .zip 파일 선택`;
+  const why = exifNoGps
+    ? `이 중 ${exifNoGps}장은 촬영 정보(시간·기종)는 남아 있는데 위치만 빠져 있어, 업로드 과정에서 위치가 지워진 것으로 보입니다.`
+    : `사진에 촬영 정보 자체가 없습니다. 메신저로 받은 사진이거나 편집·캡처된 사진일 수 있습니다.`;
   $('tip').innerHTML = `<span class="x" onclick="this.parentNode.style.display='none'">✕</span>
-    방금 올린 ${added}장 중 <b>${noGps}장</b>에서 위치 정보를 찾지 못했습니다. 폰 브라우저가 개인정보 보호를 위해 위치를 지우는 경우가 많습니다.<br>
-    ${steps}<br>
-    카톡·메신저로 받은 사진이나 '위치 정보 포함 안 함'으로 찍은 사진은 원래 위치가 없으니, 카드의 '위치 지정'으로 지도에서 찍어주세요.`;
+    방금 올린 ${added}장 중 <b>${noGps}장</b>에서 위치 정보를 찾지 못했습니다. ${why}<br>${steps}<br>
+    zip으로도 안 되면 카메라 설정의 '위치 태그'가 꺼져 있었을 수 있습니다. 그런 사진은 카드의 '위치 지정'에서 장소를 검색해 주세요.`;
   $('tip').style.display = 'block';
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
