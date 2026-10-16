@@ -30,7 +30,15 @@
   .mapCtl{position:absolute;right:14px;bottom:14px;display:flex;flex-direction:column;gap:6px}
   .mapCtl .btn{width:40px;height:40px;padding:0;font-size:18px;background:rgba(20,24,33,.85)}
   #hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:var(--muted);font-size:14px;pointer-events:none;text-align:center;line-height:1.7}
-  #banner{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:var(--accent);color:#111;padding:7px 14px;border-radius:999px;font-size:13px;font-weight:700;display:none}
+  #pickPanel{position:absolute;left:50%;top:12px;transform:translateX(-50%);width:min(460px,calc(100% - 24px));background:rgba(20,24,33,.96);border:1px solid var(--accent);border-radius:12px;padding:10px;display:none;z-index:5;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  #pickPanel .row{display:flex;gap:6px}
+  #pickPanel input{flex:1;min-width:0;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit;font-size:14px}
+  #pickPanel .sub{font-size:12px;color:var(--muted);margin:7px 2px 0}
+  #pickResults{list-style:none;margin:6px 0 0;padding:0;max-height:220px;overflow:auto}
+  #pickResults li{padding:8px 9px;border-radius:7px;font-size:13px;cursor:pointer;line-height:1.45}
+  #pickResults li:hover,#pickResults li:focus{background:#232a38;outline:none}
+  #pickResults li small{color:var(--muted);display:block}
+  #map circle.pt{fill:var(--accent);stroke:#000;stroke-width:1.5;vector-effect:non-scaling-stroke}
   main{padding:18px 20px 40px}
   .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
   .bar label{font-size:13px;color:var(--muted)}
@@ -77,7 +85,15 @@
 <div id="mapWrap">
   <svg id="map"><g id="root"></g></svg>
   <div id="hint">지도 데이터를 불러오는 중…</div>
-  <div id="banner">지도에서 사진을 찍은 위치를 클릭하세요 (Esc 취소)</div>
+  <div id="pickPanel">
+    <div class="row">
+      <input id="pickQ" type="search" placeholder="장소 검색 (예: 전주 한옥마을, 치앙마이 올드시티)" enterkeyhint="search">
+      <button class="btn primary" id="pickGo">검색</button>
+      <button class="btn" id="pickCancel">취소</button>
+    </div>
+    <ul id="pickResults"></ul>
+    <div class="sub">또는 지도를 확대해서 찍은 위치를 직접 클릭하세요. (Esc 취소)</div>
+  </div>
   <div class="mapCtl">
     <button class="btn" id="zin" title="확대">+</button>
     <button class="btn" id="zout" title="축소">−</button>
@@ -135,7 +151,10 @@ const S = { world:[], prov:[], muni:[], korea:null, photos:[], view:null, proj:n
 let uid = 0;
 const $ = id => document.getElementById(id);
 const svg = d3.select('#map'), root = d3.select('#root');
-const zoom = d3.zoom().scaleExtent([0.05, 400]).on('zoom', e => root.attr('transform', e.transform));
+const zoom = d3.zoom().scaleExtent([0.05, 400]).on('zoom', e => {
+  root.attr('transform', e.transform);
+  root.selectAll('circle.pt').attr('r', 4 / e.transform.k);
+});
 svg.call(zoom).on('dblclick.zoom', null);
 
 /* ============================== 지도 데이터 ============================== */
@@ -345,6 +364,9 @@ function render(resetZoom = true){
   root.append('g').attr('class', 'world').selectAll('path').data(S.world).join('path').attr('d', path);
   if(S.view.sub.length) root.append('g').attr('class', 'sub').selectAll('path').data(S.view.sub).join('path').attr('d', path);
   root.append('g').attr('class', 'hl').selectAll('path').data(S.view.fills.map(f => f.feature)).join('path').attr('d', path);
+  const k = d3.zoomTransform($('map')).k;
+  root.append('g').selectAll('circle').data(S.photos.filter(p => p.lonlat)).join('circle').attr('class', 'pt')
+    .attr('cx', p => proj(p.lonlat)[0]).attr('cy', p => proj(p.lonlat)[1]).attr('r', 4 / (resetZoom ? 1 : k));
   if(resetZoom) svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
 }
 async function refresh(){
@@ -360,18 +382,59 @@ $('zout').onclick = () => svg.transition().duration(250).call(zoom.scaleBy, 1/1.
 $('zfit').onclick = () => svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity);
 let rT; addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(() => render(false), 200); });
 
-// 위치 없는 사진: 지도 클릭으로 지정
+// ---------- 위치 지정: 장소 검색(OpenStreetMap Nominatim) 또는 지도 클릭 ----------
+const NOMI = 'https://nominatim.openstreetmap.org';
+async function applyLocation(id, ll, label){
+  const p = S.photos.find(x => x.id === id);
+  if(!p || !ll || ll.some(v => !isFinite(v))) return;
+  p.lonlat = ll; p.manual = true; p.placeLabel = label || null;
+  S.photos.forEach(q => q.chain = []);
+  await refresh();
+  if(!label){                                  // 클릭한 지점의 주소 이름 가져오기
+    try {
+      const r = await getJSON(`${NOMI}/reverse?format=jsonv2&zoom=14&accept-language=ko&lat=${ll[1]}&lon=${ll[0]}`);
+      if(r && r.display_name && p.lonlat === ll){ p.placeLabel = shortName(r.display_name); renderList(); }
+    } catch {}
+  }
+}
+const shortName = n => n.split(',').map(x => x.trim()).filter(x => !/^\d[\d-]*$/.test(x)).slice(0, 3).join(', ');
+async function searchPlace(){
+  const q = $('pickQ').value.trim(), ul = $('pickResults');
+  if(!q) return;
+  ul.innerHTML = '<li>검색 중…</li>';
+  try {
+    const rs = await getJSON(`${NOMI}/search?format=jsonv2&limit=6&accept-language=ko&q=${encodeURIComponent(q)}`);
+    if(!rs.length){ ul.innerHTML = '<li>결과가 없습니다. 다른 이름이나 영어로 검색해 보세요.</li>'; return; }
+    ul.innerHTML = '';
+    for(const r of rs){
+      const li = document.createElement('li'); li.tabIndex = 0;
+      const parts = r.display_name.split(',').map(x => x.trim());
+      li.innerHTML = `${esc(parts[0])}<small>${esc(parts.slice(1).join(', '))}</small>`;
+      li.onclick = li.onkeydown = ev => {
+        if(ev.type === 'keydown' && ev.key !== 'Enter') return;
+        const id = S.pick; setPick(null);
+        applyLocation(id, [+r.lon, +r.lat], shortName(r.display_name));
+      };
+      ul.appendChild(li);
+    }
+  } catch(e){ ul.innerHTML = `<li>검색에 실패했습니다 (${esc(e.message)}). 지도를 직접 클릭해 주세요.</li>`; }
+}
+$('pickGo').onclick = searchPlace;
+$('pickQ').onkeydown = e => { if(e.key === 'Enter'){ e.preventDefault(); searchPlace(); } };
+$('pickCancel').onclick = () => setPick(null);
+
 svg.on('click', ev => {
-  if(!S.pick || !S.proj) return;
+  if(!S.pick || !S.proj || ev.defaultPrevented) return;
   const t = d3.zoomTransform($('map'));
   const ll = S.proj.invert(t.invert(d3.pointer(ev, $('map'))));
-  const p = S.photos.find(x => x.id === S.pick);
-  setPick(null);
-  if(!p || !ll || ll.some(isNaN)) return;
-  p.lonlat = ll; p.chain = []; p.manual = true;
-  refresh();
+  const id = S.pick; setPick(null);
+  applyLocation(id, ll, null);
 });
-function setPick(id){ S.pick = id; $('map').classList.toggle('picking', !!id); $('banner').style.display = id ? 'block' : 'none'; }
+function setPick(id){
+  S.pick = id; $('map').classList.toggle('picking', !!id);
+  $('pickPanel').style.display = id ? 'block' : 'none';
+  if(id){ $('pickResults').innerHTML = ''; $('pickQ').value = ''; setTimeout(() => $('pickQ').focus(), 300); }
+}
 addEventListener('keydown', e => { if(e.key === 'Escape') setPick(null); });
 
 /* ============================== 업로드 & 리스트 ============================== */
@@ -450,7 +513,7 @@ function renderList(){
     const shown = S.view && S.view.fills.some(fl => fl.photo === p);
     const loc = p.lonlat
       ? (p.chain.length
-          ? `<b>${esc(placeName(p))}</b>${p.manual ? ' (수동)' : ''}<br>지도 표시: ${esc(p.region.label)}${shown ? '' : ' <span class="warn">(같은 구역의 앞선 사진이 표시됨)</span>'}`
+          ? `${p.placeLabel ? '📍 ' + esc(p.placeLabel) + (p.manual ? ' (수동)' : '') + '<br>' : ''}<b>${esc(placeName(p))}</b>${p.manual && !p.placeLabel ? ' (수동)' : ''}<br>지도 표시: ${esc(p.region.label)}${shown ? '' : ' <span class="warn">(같은 구역의 앞선 사진이 표시됨)</span>'}`
           : `<span class="warn">나라 경계 밖 위치</span>`)
       : `<span class="warn">위치 정보 없음</span>`;
     c.innerHTML = `
