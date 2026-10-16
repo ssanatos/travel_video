@@ -65,6 +65,7 @@
   .card .meta b{color:var(--text);font-weight:500}
   .card .meta .warn{color:var(--accent)}
   .card textarea{margin:8px 11px;min-height:64px;resize:vertical;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:14px}
+  .card select.lang{margin:0 11px 8px;font-size:12px;padding:5px 6px}
   .card .acts{display:flex;gap:6px;padding:0 11px 11px}
   .card .acts .btn{padding:6px 10px;font-size:12px}
   .card .acts .del{margin-left:auto;color:var(--danger)}
@@ -129,9 +130,10 @@
   <div class="bar">
     <label>목소리
       <select id="voice">
-        <option value="F1">여성 1</option><option value="F2">여성 2</option>
-        <option value="F3">여성 3</option><option value="M1">남성 1</option>
-        <option value="M2">남성 2</option><option value="M3">남성 3</option>
+        <option value="F1">여성 1</option><option value="F2">여성 2</option><option value="F3">여성 3</option>
+        <option value="F4">여성 4</option><option value="F5">여성 5</option>
+        <option value="M1">남성 1</option><option value="M2">남성 2</option><option value="M3">남성 3</option>
+        <option value="M4">남성 4</option><option value="M5">남성 5</option>
       </select>
     </label>
     <label>말 속도 <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1.05"></label>
@@ -160,9 +162,6 @@ const MUNI_URL  = KR_BASE + 'skorea_municipalities_geo_simple.json';
 // 한국 외 나라의 행정구역(ADM1=주/도, ADM2=시/군): geoBoundaries (OSM 기반, ODbL)
 const GB_DIRECT = (iso, adm) => `https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/main/releaseData/gbOpen/${iso}/${adm}/geoBoundaries-${iso}-${adm}_simplified.geojson`;
 const GB_API    = (iso, adm) => `https://www.geoboundaries.org/api/current/gbOpen/${iso}/${adm}/`;
-const TF_URL    = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
-const TTS_MODEL = 'onnx-community/Supertonic-TTS-2-ONNX';
-const VOICE_URL = v => `https://huggingface.co/${TTS_MODEL}/resolve/main/voices/${v}.bin`;
 
 const MAX_LEVEL = 2;                           // 0 나라, 1 시·도/주, 2 시·군·구
 const VW = 1280, VH = 720, FPS = 30;          // 출력 영상 크기
@@ -630,11 +629,16 @@ function renderList(){
       <div class="thumb"><img src="${p.url}" alt=""><span class="idx">${i + 1}</span></div>
       <div class="meta">${esc(fmtTime(p.time))}<br>${loc}</div>
       <textarea placeholder="자막을 입력하세요 (TTS로 읽어줍니다)">${esc(p.caption)}</textarea>
+      <select class="lang" title="읽기 언어">
+        <option value="auto">읽기 언어: 자동 감지</option>
+        ${Object.entries(TTS_LANGS).map(([k, v]) => `<option value="${k}"${p.lang === k ? ' selected' : ''}>${esc(v)}</option>`).join('')}
+      </select>
       <div class="acts">
         <button class="btn pick">${p.lonlat ? '위치 수정' : '위치 지정'}</button>
         <button class="btn del">삭제</button>
       </div>`;
     c.querySelector('textarea').oninput = e => { p.caption = e.target.value; };
+    c.querySelector('select.lang').onchange = e => { p.lang = e.target.value; };
     c.querySelector('.pick').onclick = () => { setPick(p.id); $('mapWrap').scrollIntoView({ behavior:'smooth' }); };
     c.querySelector('.del').onclick = () => {
       URL.revokeObjectURL(p.url); S.photos = S.photos.filter(x => x !== p);
@@ -647,39 +651,172 @@ function renderList(){
 function setStatus(t){ $('status').textContent = t; }
 function setProg(v){ const el = $('prog'); if(v == null){ el.hidden = true; return; } el.hidden = false; el.value = v; }
 
-/* ============================== TTS (브라우저 내 Supertonic 2) ============================== */
-let ttsPipe = null;
+/* ============================== TTS (브라우저 내 Supertonic 3, 31개 언어) ==============================
+   추론 코드는 공식 브라우저 예제(supertone-inc/supertonic web/helper.js, MIT)를 옮긴 것.
+   모델: supertone-oss-archive/supertonic-3 (OpenRAIL-M) — 최초 1회 약 400MB, 이후 브라우저 캐시 사용 */
+const ST_REV  = 'aafc6e32416a594460b32413efc49d7fe4ce6d46';
+const ST_BASE = `https://huggingface.co/supertone-oss-archive/supertonic-3/resolve/${ST_REV}`;
+const ORT_VER = '1.22.0';
+const ORT_URL = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/ort.webgpu.min.mjs`;
+const FRANC_URL = 'https://cdn.jsdelivr.net/npm/franc@6/+esm';
+
+const TTS_LANGS = { ko:'한국어', en:'English', ja:'日本語', es:'Español', fr:'Français', de:'Deutsch', it:'Italiano',
+  pt:'Português', nl:'Nederlands', pl:'Polski', cs:'Čeština', sk:'Slovenčina', sl:'Slovenščina', hr:'Hrvatski',
+  hu:'Magyar', ro:'Română', bg:'Български', ru:'Русский', uk:'Українська', el:'Ελληνικά', tr:'Türkçe',
+  ar:'العربية', hi:'हिन्दी', id:'Bahasa Indonesia', vi:'Tiếng Việt', sv:'Svenska', da:'Dansk', fi:'Suomi',
+  et:'Eesti', lt:'Lietuvių', lv:'Latviešu' };
+
+// ---------- 큰 모델 파일은 Cache API에 저장해서 두 번째부터는 바로 로드 ----------
+async function fetchCached(url, onProgress){
+  const cache = 'caches' in window ? await caches.open('supertonic3-' + ST_REV.slice(0, 8)) : null;
+  if(cache){ const hit = await cache.match(url); if(hit) return new Uint8Array(await hit.arrayBuffer()); }
+  const res = await fetch(url); if(!res.ok) throw new Error(`${res.status} ${url}`);
+  const total = +res.headers.get('content-length') || 0, reader = res.body.getReader(), parts = [];
+  let got = 0;
+  for(;;){ const { done, value } = await reader.read(); if(done) break; parts.push(value); got += value.length; onProgress && onProgress(got, total); }
+  const buf = new Uint8Array(got); let o = 0; for(const p of parts){ buf.set(p, o); o += p.length; }
+  if(cache){ try { await cache.put(url, new Response(buf, { headers: { 'content-type': 'application/octet-stream' } })); } catch(e){ console.warn('캐시 저장 실패(용량 부족?)', e); } }
+  return buf;
+}
+
+// ---------- 텍스트 전처리 (공식 helper.js와 동일) ----------
+function stPreprocess(text, lang){
+  text = text.normalize('NFKD');
+  text = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E6}-\u{1F1FF}]+/gu, '');
+  const rep = { '–':'-', '‑':'-', '—':'-', '_':' ', '“':'"', '”':'"', '‘':"'", '’':"'", '´':"'", '`':"'",
+    '[':' ', ']':' ', '|':' ', '/':' ', '#':' ', '→':' ', '←':' ' };
+  for(const [k, v] of Object.entries(rep)) text = text.replaceAll(k, v);
+  text = text.replace(/[♥☆♡©\\]/g, '');
+  for(const [k, v] of Object.entries({ '@':' at ', 'e.g.,':'for example, ', 'i.e.,':'that is, ' })) text = text.replaceAll(k, v);
+  text = text.replace(/ ,/g, ',').replace(/ \./g, '.').replace(/ !/g, '!').replace(/ \?/g, '?').replace(/ ;/g, ';').replace(/ :/g, ':').replace(/ '/g, "'");
+  while(text.includes('""')) text = text.replace('""', '"');
+  while(text.includes("''")) text = text.replace("''", "'");
+  text = text.replace(/\s+/g, ' ').trim();
+  if(!/[.!?;:,'"')\]}…。」』】〉》›»]$/.test(text)) text += '.';
+  return `<${lang}>${text}</${lang}>`;
+}
+
+// ---------- 모델 로드 ----------
+let stEngine = null;
 async function getTTS(){
-  if(ttsPipe) return ttsPipe;
-  const { pipeline } = await import(TF_URL);
-  const progress_callback = x => {
-    if(x.status === 'progress' && x.total) setStatus(`음성 모델 다운로드 중… ${x.file || ''} ${Math.round(x.loaded / x.total * 100)}% (최초 1회, 이후 캐시)`);
-  };
-  const devices = ('gpu' in navigator) ? ['webgpu', 'wasm'] : ['wasm'];
-  let err;
-  for(const device of devices){
-    try { ttsPipe = await pipeline('text-to-speech', TTS_MODEL, { device, progress_callback }); return ttsPipe; }
-    catch(e){ err = e; console.warn('TTS', device, e); }
-  }
-  throw err;
+  if(stEngine) return stEngine;
+  stEngine = (async () => {
+    const ort = await import(ORT_URL);
+    ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
+    const [cfgs, indexer] = await Promise.all([getJSON(`${ST_BASE}/onnx/tts.json`), getJSON(`${ST_BASE}/onnx/unicode_indexer.json`)]);
+    const names = ['duration_predictor', 'text_encoder', 'vector_estimator', 'vocoder'];
+    const bufs = [];
+    for(let i = 0; i < names.length; i++){
+      bufs.push(await fetchCached(`${ST_BASE}/onnx/${names[i]}.onnx`, (g, t) =>
+        setStatus(`음성 모델 다운로드 중 (${i + 1}/4)… ${t ? Math.round(g / t * 100) + '%' : Math.round(g / 1048576) + 'MB'} · 최초 1회만, 이후 캐시 사용`)));
+    }
+    setStatus('음성 모델 준비 중…');
+    const make = async ep => Promise.all(bufs.map(b => ort.InferenceSession.create(b, { executionProviders: [ep], graphOptimizationLevel: 'all' })));
+    let sessions;
+    if('gpu' in navigator){ try { sessions = await make('webgpu'); } catch(e){ console.warn('WebGPU 실패 → WASM', e); } }
+    if(!sessions) sessions = await make('wasm');
+    const [dp, enc, est, voc] = sessions;
+    return { ort, cfgs, indexer, dp, enc, est, voc, sr: cfgs.ae.sample_rate, styles: new Map() };
+  })();
+  try { return await stEngine; } catch(e){ stEngine = null; throw e; }
 }
+async function getStyle(E, voice){
+  if(E.styles.has(voice)) return E.styles.get(voice);
+  const j = await getJSON(`${ST_BASE}/voice_styles/${voice}.json`);
+  const t = (o) => new E.ort.Tensor('float32', new Float32Array(o.data.flat(Infinity)), o.dims);
+  const st = { ttl: t(j.style_ttl), dp: t(j.style_dp) };
+  E.styles.set(voice, st);
+  return st;
+}
+
+// ---------- 한 문장 합성 (공식 _infer를 단일 배치로) ----------
+async function stInfer(E, text, lang, style, speed, steps = 8){
+  const { ort } = E;
+  const s = stPreprocess(text, lang);
+  const ids = new BigInt64Array(s.length);
+  for(let j = 0; j < s.length; j++){ const cp = s.codePointAt(j); ids[j] = BigInt(cp < E.indexer.length ? E.indexer[cp] : -1); }
+  const L = s.length;
+  const idsT = new ort.Tensor('int64', ids, [1, L]);
+  const maskT = new ort.Tensor('float32', new Float32Array(L).fill(1), [1, 1, L]);
+  const dur = (await E.dp.run({ text_ids: idsT, style_dp: style.dp, text_mask: maskT })).duration.data[0] / speed;
+  const textEmb = (await E.enc.run({ text_ids: idsT, style_ttl: style.ttl, text_mask: maskT })).text_emb;
+
+  const chunk = E.cfgs.ae.base_chunk_size * E.cfgs.ttl.chunk_compress_factor;
+  const wavLen = Math.floor(dur * E.sr);
+  const T = Math.max(1, Math.floor((wavLen + chunk - 1) / chunk));
+  const D = E.cfgs.ttl.latent_dim * E.cfgs.ttl.chunk_compress_factor;
+  let xt = new Float32Array(D * T);
+  for(let i = 0; i < xt.length; i++){                       // Box-Muller 가우시안 노이즈
+    const u1 = Math.max(1e-4, Math.random()), u2 = Math.random();
+    xt[i] = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+  const lmaskT = new ort.Tensor('float32', new Float32Array(T).fill(1), [1, 1, T]);
+  const totalT = new ort.Tensor('float32', new Float32Array([steps]), [1]);
+  for(let step = 0; step < steps; step++){
+    const out = await E.est.run({
+      noisy_latent: new ort.Tensor('float32', xt, [1, D, T]), text_emb: textEmb, style_ttl: style.ttl,
+      latent_mask: lmaskT, text_mask: maskT,
+      current_step: new ort.Tensor('float32', new Float32Array([step]), [1]), total_step: totalT
+    });
+    xt = new Float32Array(out.denoised_latent.data);
+  }
+  const wav = (await E.voc.run({ latent: new ort.Tensor('float32', xt, [1, D, T]) })).wav_tts.data;
+  return Float32Array.from(wavLen > 0 && wavLen < wav.length ? wav.subarray(0, wavLen) : wav);
+}
+
+// ---------- 언어 감지 ----------
+const F3 = { ekk:'et', eng:'en', spa:'es', fra:'fr', por:'pt', deu:'de', ita:'it', nld:'nl', pol:'pl', ces:'cs', slk:'sk',
+  slv:'sl', hrv:'hr', srp:'hr', bos:'hr', hun:'hu', ron:'ro', swe:'sv', dan:'da', nob:'da', fin:'fi', est:'et',
+  lit:'lt', lvs:'lv', lav:'lv', tur:'tr', ind:'id', zlm:'id', msa:'id', vie:'vi', rus:'ru', ukr:'uk', bul:'bg',
+  ell:'el', arb:'ar', pes:'ar', urd:'ar', hin:'hi', mar:'hi', nep:'hi', jpn:'ja', kor:'ko' };
+let francLib = null;
+async function detectLang(text){
+  const t = text.replace(/[\d\s\p{P}\p{S}]/gu, '');
+  if(!t) return 'na';
+  const count = re => (t.match(re) || []).length;
+  const scripts = [
+    ['ko', count(/[가-힯ᄀ-ᇿ㄰-㆏]/g)],
+    ['ja', count(/[぀-ヿ一-鿿]/g)],          // 한자만 있는 문장도 일본어로 읽음 (중국어 미지원)
+    ['ar', count(/[؀-ۿ]/g)], ['hi', count(/[ऀ-ॿ]/g)],
+    ['el', count(/[Ͱ-Ͽ]/g)], ['cyr', count(/[Ѐ-ӿ]/g)],
+    ['lat', count(/\p{Script=Latin}/gu)]
+  ].sort((a, b) => b[1] - a[1]);
+  const top = scripts[0][0];
+  if(top === 'cyr'){
+    if(/[іїєґІЇЄҐ]/.test(t)) return 'uk';
+    if(/[ыэЫЭ]/.test(t)) return 'ru';
+    if(/ъ/.test(t)) return 'bg';
+    return 'ru';
+  }
+  if(top !== 'lat') return top;
+  // 라틴 문자: franc로 언어 판별, 짧거나 애매하면 영어
+  try {
+    francLib = francLib || import(FRANC_URL);
+    const { franc } = await francLib;
+    const code = franc(text, { minLength: 3, only: Object.keys(F3).filter(k => !['rus','ukr','bul','ell','arb','pes','urd','hin','mar','nep','jpn','kor'].includes(k)) });
+    return F3[code] || 'en';
+  } catch(e){ console.warn('언어 감지 실패', e); return 'en'; }
+}
+
 function splitSentences(t){
-  return t.replace(/\s+/g, ' ').split(/(?<=[.!?…。])\s+/).map(s => s.trim()).filter(Boolean);
+  return t.replace(/\s+/g, ' ').split(/(?<=[.!?…。！？])\s*/).map(s => s.trim()).filter(Boolean);
 }
-async function synth(text, voice, speed){
-  const pipe = await getTTS();
-  const parts = [], gap = 0.22;
-  let sr = 44100;
+// 자막 하나 합성: 문장마다 언어를 감지(또는 지정 언어)해서 읽고 이어 붙임
+async function synth(text, voice, speed, forcedLang){
+  const E = await getTTS();
+  const style = await getStyle(E, voice);
+  const parts = [], langs = [], gap = 0.22;
   for(const s of splitSentences(text)){
-    const out = await pipe(`<ko>${s}</ko>`, { speaker_embeddings: VOICE_URL(voice), num_inference_steps: 8, speed });
-    sr = out.sampling_rate; parts.push(out.audio);
+    const lang = forcedLang && forcedLang !== 'auto' ? forcedLang : await detectLang(s);
+    parts.push(await stInfer(E, s, lang, style, speed)); langs.push(lang);
   }
-  const g = Math.round(gap * sr);
+  const g = Math.round(gap * E.sr);
   const total = parts.reduce((a, p) => a + p.length, 0) + g * Math.max(0, parts.length - 1);
   const data = new Float32Array(total); let o = 0;
   parts.forEach((p, i) => { data.set(p, o); o += p.length + (i < parts.length - 1 ? g : 0); });
-  return { data, sr };
+  return { data, sr: E.sr, langs };
 }
+
 function resample(data, from, to){
   if(from === to) return data;
   const n = Math.round(data.length * to / from), out = new Float32Array(n), r = from / to;
@@ -825,7 +962,7 @@ async function produce(){
     if(ttsOK){
       try {
         setStatus(`TTS 더빙 생성 중… (${i + 1}/${photos.length})`);
-        const { data, sr } = await synth(p.caption, voice, speed);
+        const { data, sr } = await synth(p.caption, voice, speed, p.lang);
         voiceClips.set(p.id, resample(data, sr, SR));
       } catch(e){
         console.error(e); ttsOK = false;
