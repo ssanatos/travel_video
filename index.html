@@ -103,33 +103,30 @@
 <script type="module">
 /* ============================== 설정 ============================== */
 const WORLD_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json';
+const ISO_URL   = 'https://cdn.jsdelivr.net/npm/i18n-iso-countries@7/codes.json';     // [alpha2, alpha3, numeric]
+const KONAME_URL= 'https://cdn.jsdelivr.net/npm/i18n-iso-countries@7/langs/ko.json';  // 국가 한국어 이름
 const KR_BASE   = 'https://cdn.jsdelivr.net/gh/southkorea/southkorea-maps@master/kostat/2013/json/';
 const PROV_URL  = KR_BASE + 'skorea_provinces_geo_simple.json';
 const MUNI_URL  = KR_BASE + 'skorea_municipalities_geo_simple.json';
+// 한국 외 나라의 행정구역(ADM1=주/도, ADM2=시/군): geoBoundaries (OSM 기반, ODbL)
+const GB_DIRECT = (iso, adm) => `https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/main/releaseData/gbOpen/${iso}/${adm}/geoBoundaries-${iso}-${adm}_simplified.geojson`;
+const GB_API    = (iso, adm) => `https://www.geoboundaries.org/api/current/gbOpen/${iso}/${adm}/`;
 const TF_URL    = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 const TTS_MODEL = 'onnx-community/Supertonic-TTS-2-ONNX';
 const VOICE_URL = v => `https://huggingface.co/${TTS_MODEL}/resolve/main/voices/${v}.bin`;
 
+const MAX_LEVEL = 2;                           // 0 나라, 1 시·도/주, 2 시·군·구
 const VW = 1280, VH = 720, FPS = 30;          // 출력 영상 크기
 const T_INTRO = 1.2, T_FOCUS = 1.0, T_IN = 0.8, T_OUT = 0.7, T_OUTRO = 1.8;
 const KB_ZOOM = 0.15;                          // 자막 동안 확대되는 정도
 const SUB_FONT = "700 34px 'Noto Sans KR', sans-serif";
-
-const KO = {'South Korea':'대한민국','North Korea':'북한','Japan':'일본','China':'중국','Taiwan':'대만',
-  'United States of America':'미국','Canada':'캐나다','Mexico':'멕시코','Vietnam':'베트남','Thailand':'태국',
-  'Philippines':'필리핀','Indonesia':'인도네시아','Malaysia':'말레이시아','Singapore':'싱가포르','Mongolia':'몽골',
-  'Russia':'러시아','India':'인도','Australia':'호주','New Zealand':'뉴질랜드','United Kingdom':'영국',
-  'France':'프랑스','Germany':'독일','Italy':'이탈리아','Spain':'스페인','Portugal':'포르투갈','Switzerland':'스위스',
-  'Austria':'오스트리아','Netherlands':'네덜란드','Belgium':'벨기에','Czechia':'체코','Hungary':'헝가리',
-  'Greece':'그리스','Turkey':'튀르키예','Egypt':'이집트','Brazil':'브라질','Argentina':'아르헨티나','Peru':'페루',
-  'Laos':'라오스','Cambodia':'캄보디아','Myanmar':'미얀마','Nepal':'네팔','United Arab Emirates':'아랍에미리트'};
 
 /* ============================== 상태 ============================== */
 const S = { world:[], prov:[], muni:[], korea:null, photos:[], view:null, proj:null, pick:null, busy:false };
 let uid = 0;
 const $ = id => document.getElementById(id);
 const svg = d3.select('#map'), root = d3.select('#root');
-const zoom = d3.zoom().scaleExtent([0.3, 60]).on('zoom', e => root.attr('transform', e.transform));
+const zoom = d3.zoom().scaleExtent([0.05, 400]).on('zoom', e => root.attr('transform', e.transform));
 svg.call(zoom).on('dblclick.zoom', null);
 
 /* ============================== 지도 데이터 ============================== */
@@ -142,79 +139,175 @@ function rewind(f){
   return f;
 }
 const centroid = f => f._c || (f._c = d3.geoCentroid(f));
+const bounds   = f => f._b || (f._b = d3.geoBounds(f));
+const getJSON  = u => fetch(u).then(r => { if(!r.ok) throw new Error(r.status + ' ' + u); return r.json(); });
 
 async function loadData(){
-  const getJSON = u => fetch(u).then(r => { if(!r.ok) throw new Error(r.status); return r.json(); });
-  const [w, p, m] = await Promise.all([getJSON(WORLD_URL), getJSON(PROV_URL).catch(()=>null), getJSON(MUNI_URL).catch(()=>null)]);
+  const [w, p, m, codes, ko] = await Promise.all([
+    getJSON(WORLD_URL), getJSON(PROV_URL).catch(()=>null), getJSON(MUNI_URL).catch(()=>null),
+    getJSON(ISO_URL).catch(()=>[]), getJSON(KONAME_URL).catch(()=>null)]);
+  const byNum = new Map(codes.map(([a2, a3, n]) => [String(n).padStart(3, '0'), { a2, a3 }]));
+  const koName = a2 => { const v = ko && ko.countries && ko.countries[a2]; return Array.isArray(v) ? v[0] : v; };
   S.world = topojson.feature(w, w.objects.countries).features.filter(f => f.id !== '010'); // 남극 제외
-  S.world.forEach(f => { f.key = 'c' + (f.id ?? f.properties.name); f.label = KO[f.properties.name] || f.properties.name; f.level = 0; });
+  S.world.forEach(f => {
+    const c = f.id != null ? byNum.get(String(f.id).padStart(3, '0')) : null;
+    f.key = 'c' + (f.id ?? f.properties.name); f.level = 0; f.iso3 = c ? c.a3 : null;
+    f.label = (c && koName(c.a2)) || f.properties.name;
+  });
   S.korea = S.world.find(f => f.id === '410');
+  if(S.korea) S.korea.label = '대한민국';
   if(p && S.korea){
     S.prov = p.features.map(rewind);
-    S.prov.forEach((f,i) => { const pr = f.properties; f.key = 'p' + (pr.code ?? i); f.code = String(pr.code ?? ''); f.label = pr.name || pr.name_eng || '?'; f.level = 1; f.parent = S.korea; });
+    S.prov.forEach((f,i) => { const pr = f.properties; f.key = 'kp' + (pr.code ?? i); f.code = String(pr.code ?? ''); f.label = pr.name || pr.name_eng || '?'; f.level = 1; f.parent = S.korea; f.kr = true; });
   }
   if(m && S.prov.length){
     S.muni = m.features.map(rewind);
     S.muni.forEach((f,i) => {
-      const pr = f.properties; f.key = 'm' + (pr.code ?? i); f.label = pr.name || pr.name_eng || '?'; f.level = 2;
+      const pr = f.properties; f.key = 'km' + (pr.code ?? i); f.label = pr.name || pr.name_eng || '?'; f.level = 2; f.kr = true;
       const code = String(pr.code ?? '');
       f.parent = S.prov.find(pv => pv.code && code.startsWith(pv.code)) || S.prov.find(pv => d3.geoContains(pv, centroid(f)));
     });
   }
 }
 
-// 점이 속한 영역 찾기 (해안 사진 대비: 없으면 가까운 영역)
-function findIn(features, ll, maxRad = 0.02){
-  const hit = features.find(f => d3.geoContains(f, ll));
+// geoBoundaries 행정구역 불러오기 (필요할 때만, 나라별 캐시)
+const gbCache = new Map();
+function loadGB(iso, adm){
+  const k = iso + adm;
+  if(!gbCache.has(k)) gbCache.set(k, (async () => {
+    const tryUrl = async u => {
+      const r = await fetch(u); if(!r.ok) throw new Error(r.status);
+      const txt = await r.text(); if(txt.startsWith('version https://git-lfs')) throw new Error('lfs pointer');
+      return JSON.parse(txt);
+    };
+    let gj;
+    try { gj = await tryUrl(GB_DIRECT(iso, adm)); }
+    catch {
+      const meta = await getJSON(GB_API(iso, adm));
+      const u = meta.simplifiedGeometryGeoJSON || meta.gjDownloadURL;
+      const mm = u.match(/github\.com\/([^/]+)\/([^/]+)\/raw\/([^/]+)\/(.+)$/);
+      gj = await tryUrl(mm ? `https://media.githubusercontent.com/media/${mm[1]}/${mm[2]}/${mm[3]}/${mm[4]}` : u);
+    }
+    return (gj.features || []).filter(f => f.geometry).map(rewind);
+  })());
+  return gbCache.get(k);
+}
+
+// 하위 행정구역 (결과는 f._kids에 저장해서 그릴 때 동기적으로 사용)
+const kidsCache = new Map();
+function childrenOf(f){
+  if(f.level >= MAX_LEVEL) return Promise.resolve([]);
+  if(!kidsCache.has(f.key)) kidsCache.set(f.key, (async () => {
+    let kids = [];
+    try {
+      if(f === S.korea) kids = S.prov;
+      else if(f.kr && f.level === 1) kids = S.muni.filter(m => m.parent === f);
+      else if(f.level === 0 && f.iso3){
+        setStatus(`${f.label} 행정구역 경계를 불러오는 중…`);
+        kids = (await loadGB(f.iso3, 'ADM1')).map((x, i) => {
+          x.key = f.key + '/1/' + (x.properties.shapeID || i); x.label = x.properties.shapeName || '?';
+          x.level = 1; x.parent = f; x.iso3 = f.iso3; return x;
+        });
+      } else if(f.level === 1 && f.iso3){
+        setStatus(`${f.parent.label} 세부 행정구역 경계를 불러오는 중…`);
+        const siblings = await childrenOf(f.parent);
+        const all = await loadGB(f.iso3, 'ADM2');
+        if(!all._assigned){                    // ADM2 → 소속 ADM1 판정 (중심점 기준, 1회)
+          all.forEach((x, i) => {
+            x.key = f.parent.key + '/2/' + (x.properties.shapeID || i); x.label = x.properties.shapeName || '?';
+            x.level = 2; x.iso3 = f.iso3;
+            x.parent = siblings.find(a => d3.geoContains(a, centroid(x))) || null;
+          });
+          all._assigned = true;
+        }
+        kids = all.filter(x => x.parent === f);
+      }
+    } catch(e){ console.warn('행정구역 데이터 없음', f.label, e); kids = []; }
+    f._kids = kids;
+    return kids;
+  })());
+  return kidsCache.get(f.key);
+}
+
+// 점과 영역 경계 사이 최소 거리(라디안) — 해안·섬 사진 보정용
+function distToFeature(f, ll){
+  let best = Infinity;
+  const walk = c => { if(typeof c[0] === 'number'){ const d = d3.geoDistance(ll, c); if(d < best) best = d; } else c.forEach(walk); };
+  walk(f.geometry.coordinates);
+  return best;
+}
+function nearBounds(f, ll, padDeg){
+  const [[x0, y0], [x1, y1]] = bounds(f);
+  if(x0 > x1) return true;                     // 날짜변경선을 걸치는 나라
+  return ll[0] >= x0 - padDeg && ll[0] <= x1 + padDeg && ll[1] >= y0 - padDeg && ll[1] <= y1 + padDeg;
+}
+// 점이 속한 영역 찾기: 다각형 안 → 없으면 경계에서 maxKm 이내 가장 가까운 영역
+function findIn(features, ll, maxKm = 40){
+  const cand = features.filter(f => nearBounds(f, ll, 1));
+  const hit = cand.find(f => d3.geoContains(f, ll));
   if(hit) return hit;
   let best = null, bd = Infinity;
-  for(const f of features){ const d = d3.geoDistance(ll, centroid(f)); if(d < bd){ bd = d; best = f; } }
-  return bd < maxRad ? best : null;
+  for(const f of cand){ const d = distToFeature(f, ll); if(d < bd){ bd = d; best = f; } }
+  return bd * 6371 <= maxKm ? best : null;
 }
-function chainOf(ll){
-  let c = findIn(S.world, ll, 0.015);
-  let pv = S.prov.length ? findIn(S.prov, ll, 0.006) : null;
-  if(!c && pv) c = S.korea;
-  if(!c) return [];
-  if(c !== S.korea || !pv) return [c];
-  const mu = S.muni.length ? findIn(S.muni.filter(x => x.parent === pv), ll, 0.004) : null;
-  return mu ? [c, pv, mu] : [c, pv];
+function countryOf(ll){
+  let c = findIn(S.world, ll, 60);
+  if(!c && S.prov.length && findIn(S.prov, ll, 20)) c = S.korea;
+  return c;
+}
+
+/* ============================== 영역 배정 ============================== */
+// 같은 영역을 공유하는 사진이 2장 이상인 동안만 하위 행정구역으로 내려가며 체인을 늘림
+async function refineChains(){
+  for(const p of S.photos){
+    if(!p.lonlat){ p.chain = []; continue; }
+    if(!p.chain || !p.chain.length){ const c = countryOf(p.lonlat); p.chain = c ? [c] : []; }
+  }
+  for(let guard = 0; guard < 6; guard++){
+    const groups = new Map();
+    for(const p of S.photos){
+      if(!p.chain.length) continue;
+      const last = p.chain[p.chain.length - 1];
+      if(!groups.has(last.key)) groups.set(last.key, { f: last, ps: [] });
+      groups.get(last.key).ps.push(p);
+    }
+    let changed = false;
+    for(const { f, ps } of groups.values()){
+      if(ps.length < 2 || f.level >= MAX_LEVEL || f._noMore) continue;
+      const kids = await childrenOf(f);
+      let any = false;
+      for(const p of ps){
+        const k = kids.length ? findIn(kids, p.lonlat, f.level === 0 ? 30 : 15) : null;
+        if(k){ p.chain.push(k); any = true; }
+      }
+      if(any) changed = true; else if(!kids.length) f._noMore = true;
+    }
+    if(!changed) break;
+  }
+  // 각 사진의 영역 = 다른 사진과 겹치지 않는 가장 큰 행정구역 (끝까지 겹치면 가장 작은 단위)
+  for(const p of S.photos){
+    p.region = null;
+    if(!p.chain.length) continue;
+    p.region = p.chain.find(r => !S.photos.some(q => q !== p && q.chain.includes(r))) || p.chain[p.chain.length - 1];
+  }
 }
 
 /* ============================== 보기 계산 ============================== */
 function computeView(){
-  const located = S.photos.filter(p => p.chain.length);
-  S.photos.forEach(p => p.region = null);
+  const located = S.photos.filter(p => p.region);
   if(!located.length) return { fit:{type:'FeatureCollection',features:S.world}, fills:[], sub:[] };
-  const chains = located.map(p => p.chain);
-  let d = 0;
-  while(chains.every(c => c.length > d && c[d] === chains[0][d])) d++;
-  let level, fitFeatures;
-  if(d === 0){                                  // 서로 다른 나라
-    level = 0;
-    fitFeatures = [...new Set(chains.map(c => c[0]))];
-  } else if(chains.some(c => c.length > d)){    // 같은 상위 영역 안의 서로 다른 하위 영역
-    level = d; fitFeatures = [chains[0][d-1]];
-  } else {                                      // 모두 같은 가장 깊은 영역
-    level = d - 1;
-    const r = chains[0][d-1];
-    fitFeatures = [r.parent && r.level > 0 ? r.parent : r];
-  }
   const fillMap = new Map();
-  for(const p of located){                      // photos는 시간순 → 영역마다 가장 이른 사진
-    const r = p.chain[level]; if(!r) continue;
-    p.region = r;
-    if(!fillMap.has(r.key)) fillMap.set(r.key, { feature:r, photo:p });
+  for(const p of located)                      // photos는 시간순 → 같은 영역이면 가장 이른 사진
+    if(!fillMap.has(p.region.key)) fillMap.set(p.region.key, { feature:p.region, photo:p });
+  const fills = [...fillMap.values()].sort((a, b) => a.feature.level - b.feature.level); // 큰 영역 먼저
+  // 화면 맞춤: 각 영역의 상위 행정구역(나라 단위면 그 나라)을 모두 포함
+  const fitSet = new Set(fills.map(fl => fl.feature.parent || fl.feature));
+  // 세부 경계선: 채워진 영역의 형제 구역들 + 그 위 단계
+  const sub = new Set();
+  for(const fl of fills){
+    for(let q = fl.feature.parent; q; q = q.parent) (q._kids || []).forEach(k => sub.add(k));
   }
-  const fills = [...fillMap.values()];
-  let sub = [];
-  const maxLv = Math.max(level, ...fitFeatures.map(f => f.level));
-  if(maxLv >= 1 || fitFeatures.includes(S.korea)) sub = sub.concat(S.prov);
-  if(level === 2 || fitFeatures.some(f => f.level >= 1)){
-    const parents = new Set(fills.map(f => f.feature.parent).concat(fitFeatures));
-    sub = sub.concat(S.muni.filter(m => parents.has(m.parent)));
-  }
-  return { fit:{type:'FeatureCollection',features:fitFeatures}, fills, sub };
+  return { fit:{type:'FeatureCollection',features:[...fitSet]}, fills, sub:[...sub] };
 }
 
 /* ============================== 지도 그리기 ============================== */
@@ -222,10 +315,13 @@ function mapSize(){ const r = $('map').getBoundingClientRect(); return { w: r.wi
 function render(resetZoom = true){
   if(!S.world.length) return;
   S.view = computeView();
-  const { w, h } = mapSize(), pad = Math.min(w, h) * 0.06;
+  const { w, h } = mapSize(), pad = Math.min(w, h) * 0.08;
   svg.attr('width', w).attr('height', h);
   const proj = d3.geoMercator().fitExtent([[pad, pad], [w - pad, h - pad]], S.view.fit);
   S.proj = proj; S.mapW = w; S.mapH = h;
+  // 세계 전체가 보일 만큼 더 축소할 수 있게 최소 배율 계산
+  const worldScale = d3.geoMercator().fitExtent([[pad, pad], [w - pad, h - pad]], {type:'FeatureCollection',features:S.world}).scale();
+  zoom.scaleExtent([Math.min(1, worldScale / proj.scale()) * 0.6, 400]);
   const path = d3.geoPath(proj);
   root.selectAll('*').remove();
   const defs = root.append('defs');
@@ -242,6 +338,14 @@ function render(resetZoom = true){
   root.append('g').attr('class', 'hl').selectAll('path').data(S.view.fills.map(f => f.feature)).join('path').attr('d', path);
   if(resetZoom) svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
 }
+async function refresh(){
+  await refineChains();
+  render(); renderList();
+  const missing = S.photos.filter(p => !p.lonlat).length;
+  const outside = S.photos.filter(p => p.lonlat && !p.chain.length).length;
+  setStatus([missing && `위치 정보가 없는 사진 ${missing}장 — 카드의 '위치 지정'으로 지도에서 찍어주세요.`,
+             outside && `어느 나라에도 속하지 않는 위치(바다 등)의 사진 ${outside}장`].filter(Boolean).join(' · '));
+}
 $('zin').onclick  = () => svg.transition().duration(250).call(zoom.scaleBy, 1.5);
 $('zout').onclick = () => svg.transition().duration(250).call(zoom.scaleBy, 1/1.5);
 $('zfit').onclick = () => svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity);
@@ -255,8 +359,8 @@ svg.on('click', ev => {
   const p = S.photos.find(x => x.id === S.pick);
   setPick(null);
   if(!p || !ll || ll.some(isNaN)) return;
-  p.lonlat = ll; p.chain = chainOf(ll); p.manual = true;
-  render(); renderList();
+  p.lonlat = ll; p.chain = []; p.manual = true;
+  refresh();
 });
 function setPick(id){ S.pick = id; $('map').classList.toggle('picking', !!id); $('banner').style.display = id ? 'block' : 'none'; }
 addEventListener('keydown', e => { if(e.key === 'Escape') setPick(null); });
@@ -273,13 +377,11 @@ $('file').onchange = async e => {
     try { meta = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate']); } catch {}
     const time = (meta && (meta.DateTimeOriginal || meta.CreateDate)) || new Date(file.lastModified);
     const lonlat = gps && isFinite(gps.longitude) && isFinite(gps.latitude) ? [gps.longitude, gps.latitude] : null;
-    S.photos.push({ id: ++uid, file, url: URL.createObjectURL(file), time: new Date(time), lonlat,
-      chain: lonlat ? chainOf(lonlat) : [], caption: '' });
+    S.photos.push({ id: ++uid, file, url: URL.createObjectURL(file), time: new Date(time), lonlat, chain: [], caption: '' });
   }
   S.photos.sort((a, b) => a.time - b.time);
-  const missing = S.photos.filter(p => !p.lonlat).length;
-  setStatus(missing ? `위치 정보가 없는 사진 ${missing}장 — 카드의 '위치 지정'으로 지도에서 찍어주세요.` : '');
-  render(); renderList();
+  S.photos.forEach(p => p.chain = []);        // 사진 구성이 바뀌면 영역을 처음부터 다시 배정
+  await refresh();
 };
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtTime = d => isNaN(d) ? '' : d.toLocaleString('ko-KR', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
@@ -292,8 +394,11 @@ function renderList(){
   $('hint').innerHTML = '사진을 업로드하면<br>찍은 곳의 외곽선 안이 사진으로 채워집니다';
   S.photos.forEach((p, i) => {
     const c = document.createElement('div'); c.className = 'card';
+    const shown = S.view && S.view.fills.some(fl => fl.photo === p);
     const loc = p.lonlat
-      ? `<b>${esc(placeName(p) || '지도 밖 위치')}</b>${p.manual ? ' (수동)' : ''}`
+      ? (p.chain.length
+          ? `<b>${esc(placeName(p))}</b>${p.manual ? ' (수동)' : ''}<br>지도 표시: ${esc(p.region.label)}${shown ? '' : ' <span class="warn">(같은 구역의 앞선 사진이 표시됨)</span>'}`
+          : `<span class="warn">나라 경계 밖 위치</span>`)
       : `<span class="warn">위치 정보 없음</span>`;
     c.innerHTML = `
       <div class="thumb"><img src="${p.url}" alt=""><span class="idx">${i + 1}</span></div>
@@ -306,7 +411,8 @@ function renderList(){
     c.querySelector('textarea').oninput = e => { p.caption = e.target.value; };
     c.querySelector('.pick').onclick = () => { setPick(p.id); $('mapWrap').scrollIntoView({ behavior:'smooth' }); };
     c.querySelector('.del').onclick = () => {
-      URL.revokeObjectURL(p.url); S.photos = S.photos.filter(x => x !== p); render(); renderList();
+      URL.revokeObjectURL(p.url); S.photos = S.photos.filter(x => x !== p);
+      S.photos.forEach(q => q.chain = []); refresh();
     };
     list.appendChild(c);
   });
@@ -589,7 +695,7 @@ async function produce(){
 }
 
 /* ============================== 시작 ============================== */
-loadData().then(() => { render(); renderList(); })
+loadData().then(() => refresh())
   .catch(e => { console.error(e); $('hint').textContent = '지도 데이터를 불러오지 못했습니다: ' + e.message; });
 </script>
 </body>
