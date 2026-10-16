@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포토 월드맵</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141821; --line:#262c39; --text:#eef1f6; --muted:#8b93a5;
+    --accent:#ffd54a; --danger:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:'Noto Sans KR',system-ui,sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:18px;margin:0 auto 0 0;font-weight:700;letter-spacing:-.2px}
+  header h1 span{color:var(--muted);font-weight:400;font-size:13px;margin-left:8px}
+  .btn{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--text);padding:9px 14px;border-radius:8px;font:inherit;font-size:14px;cursor:pointer}
+  .btn:hover{border-color:#3a4256}
+  .btn.primary{background:var(--accent);color:#111;border-color:var(--accent);font-weight:700}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  #mapWrap{position:relative;height:64vh;min-height:360px;background:#000;overflow:hidden}
+  #map{display:block;width:100%;height:100%;cursor:grab}
+  #map.picking{cursor:crosshair}
+  #map .world path{fill:none;stroke:#fff;stroke-width:.8;vector-effect:non-scaling-stroke}
+  #map .sub path{fill:none;stroke:rgba(255,255,255,.5);stroke-width:.6;vector-effect:non-scaling-stroke}
+  #map .hl path{fill:none;stroke:#fff;stroke-width:1.6;vector-effect:non-scaling-stroke}
+  .mapCtl{position:absolute;right:14px;bottom:14px;display:flex;flex-direction:column;gap:6px}
+  .mapCtl .btn{width:40px;height:40px;padding:0;font-size:18px;background:rgba(20,24,33,.85)}
+  #hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:var(--muted);font-size:14px;pointer-events:none;text-align:center;line-height:1.7}
+  #banner{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:var(--accent);color:#111;padding:7px 14px;border-radius:999px;font-size:13px;font-weight:700;display:none}
+  main{padding:18px 20px 40px}
+  .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+  .bar label{font-size:13px;color:var(--muted)}
+  select,input[type=range]{font:inherit;font-size:14px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 8px}
+  #status{font-size:13px;color:var(--muted);flex:1;min-width:200px}
+  progress{width:220px;height:8px;accent-color:var(--accent)}
+  #list{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+  .card .thumb{position:relative;aspect-ratio:4/3;background:#000}
+  .card img{width:100%;height:100%;object-fit:cover;display:block}
+  .card .idx{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.7);font-size:12px;padding:2px 8px;border-radius:999px}
+  .card .meta{padding:9px 11px 0;font-size:12px;color:var(--muted);line-height:1.6}
+  .card .meta b{color:var(--text);font-weight:500}
+  .card .meta .warn{color:var(--accent)}
+  .card textarea{margin:8px 11px;min-height:64px;resize:vertical;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:14px}
+  .card .acts{display:flex;gap:6px;padding:0 11px 11px}
+  .card .acts .btn{padding:6px 10px;font-size:12px}
+  .card .acts .del{margin-left:auto;color:var(--danger)}
+  #result{margin-top:22px;display:none}
+  #result video{max-width:100%;width:720px;border-radius:10px;background:#000;display:block;margin-bottom:10px}
+  #empty{color:var(--muted);font-size:14px;padding:20px 0}
+  canvas#out{display:none}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifr@7/dist/full.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5/build/mp4-muxer.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>포토 월드맵<span>사진 위치로 지도를 채우고 영상으로 만들기</span></h1>
+  <input id="file" type="file" accept="image/*" multiple hidden>
+  <button class="btn primary" id="uploadBtn">사진 업로드</button>
+</header>
+
+<div id="mapWrap">
+  <svg id="map"><g id="root"></g></svg>
+  <div id="hint">지도 데이터를 불러오는 중…</div>
+  <div id="banner">지도에서 사진을 찍은 위치를 클릭하세요 (Esc 취소)</div>
+  <div class="mapCtl">
+    <button class="btn" id="zin" title="확대">+</button>
+    <button class="btn" id="zout" title="축소">−</button>
+    <button class="btn" id="zfit" title="사진에 맞춤">⤢</button>
+  </div>
+</div>
+
+<main>
+  <div class="bar">
+    <label>목소리
+      <select id="voice">
+        <option value="F1">여성 1</option><option value="F2">여성 2</option>
+        <option value="F3">여성 3</option><option value="M1">남성 1</option>
+        <option value="M2">남성 2</option><option value="M3">남성 3</option>
+      </select>
+    </label>
+    <label>말 속도 <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1.05"></label>
+    <button class="btn primary" id="makeBtn" disabled>제작</button>
+    <progress id="prog" value="0" max="1" hidden></progress>
+    <div id="status"></div>
+  </div>
+  <div id="list"></div>
+  <div id="empty">업로드한 사진이 촬영 시간 순서대로 여기에 표시됩니다.</div>
+  <div id="result">
+    <video id="video" controls playsinline></video>
+    <a class="btn" id="dl" download="photo-map.mp4">mp4 다시 다운로드</a>
+  </div>
+</main>
+<canvas id="out"></canvas>
+
+<script type="module">
+/* ============================== 설정 ============================== */
+const WORLD_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json';
+const KR_BASE   = 'https://cdn.jsdelivr.net/gh/southkorea/southkorea-maps@master/kostat/2013/json/';
+const PROV_URL  = KR_BASE + 'skorea_provinces_geo_simple.json';
+const MUNI_URL  = KR_BASE + 'skorea_municipalities_geo_simple.json';
+const TF_URL    = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+const TTS_MODEL = 'onnx-community/Supertonic-TTS-2-ONNX';
+const VOICE_URL = v => `https://huggingface.co/${TTS_MODEL}/resolve/main/voices/${v}.bin`;
+
+const VW = 1280, VH = 720, FPS = 30;          // 출력 영상 크기
+const T_INTRO = 1.2, T_FOCUS = 1.0, T_IN = 0.8, T_OUT = 0.7, T_OUTRO = 1.8;
+const KB_ZOOM = 0.15;                          // 자막 동안 확대되는 정도
+const SUB_FONT = "700 34px 'Noto Sans KR', sans-serif";
+
+const KO = {'South Korea':'대한민국','North Korea':'북한','Japan':'일본','China':'중국','Taiwan':'대만',
+  'United States of America':'미국','Canada':'캐나다','Mexico':'멕시코','Vietnam':'베트남','Thailand':'태국',
+  'Philippines':'필리핀','Indonesia':'인도네시아','Malaysia':'말레이시아','Singapore':'싱가포르','Mongolia':'몽골',
+  'Russia':'러시아','India':'인도','Australia':'호주','New Zealand':'뉴질랜드','United Kingdom':'영국',
+  'France':'프랑스','Germany':'독일','Italy':'이탈리아','Spain':'스페인','Portugal':'포르투갈','Switzerland':'스위스',
+  'Austria':'오스트리아','Netherlands':'네덜란드','Belgium':'벨기에','Czechia':'체코','Hungary':'헝가리',
+  'Greece':'그리스','Turkey':'튀르키예','Egypt':'이집트','Brazil':'브라질','Argentina':'아르헨티나','Peru':'페루',
+  'Laos':'라오스','Cambodia':'캄보디아','Myanmar':'미얀마','Nepal':'네팔','United Arab Emirates':'아랍에미리트'};
+
+/* ============================== 상태 ============================== */
+const S = { world:[], prov:[], muni:[], korea:null, photos:[], view:null, proj:null, pick:null, busy:false };
+let uid = 0;
+const $ = id => document.getElementById(id);
+const svg = d3.select('#map'), root = d3.select('#root');
+const zoom = d3.zoom().scaleExtent([0.3, 60]).on('zoom', e => root.attr('transform', e.transform));
+svg.call(zoom).on('dblclick.zoom', null);
+
+/* ============================== 지도 데이터 ============================== */
+// D3는 외곽 링이 시계방향이어야 함 → 반대로 감긴 폴리곤은 뒤집기
+function rewind(f){
+  const g = f.geometry; if(!g) return f;
+  const fix = poly => d3.geoArea({type:'Polygon',coordinates:poly}) > 2*Math.PI ? poly.map(r => r.slice().reverse()) : poly;
+  if(g.type === 'Polygon') g.coordinates = fix(g.coordinates);
+  else if(g.type === 'MultiPolygon') g.coordinates = g.coordinates.map(fix);
+  return f;
+}
+const centroid = f => f._c || (f._c = d3.geoCentroid(f));
+
+async function loadData(){
+  const getJSON = u => fetch(u).then(r => { if(!r.ok) throw new Error(r.status); return r.json(); });
+  const [w, p, m] = await Promise.all([getJSON(WORLD_URL), getJSON(PROV_URL).catch(()=>null), getJSON(MUNI_URL).catch(()=>null)]);
+  S.world = topojson.feature(w, w.objects.countries).features.filter(f => f.id !== '010'); // 남극 제외
+  S.world.forEach(f => { f.key = 'c' + (f.id ?? f.properties.name); f.label = KO[f.properties.name] || f.properties.name; f.level = 0; });
+  S.korea = S.world.find(f => f.id === '410');
+  if(p && S.korea){
+    S.prov = p.features.map(rewind);
+    S.prov.forEach((f,i) => { const pr = f.properties; f.key = 'p' + (pr.code ?? i); f.code = String(pr.code ?? ''); f.label = pr.name || pr.name_eng || '?'; f.level = 1; f.parent = S.korea; });
+  }
+  if(m && S.prov.length){
+    S.muni = m.features.map(rewind);
+    S.muni.forEach((f,i) => {
+      const pr = f.properties; f.key = 'm' + (pr.code ?? i); f.label = pr.name || pr.name_eng || '?'; f.level = 2;
+      const code = String(pr.code ?? '');
+      f.parent = S.prov.find(pv => pv.code && code.startsWith(pv.code)) || S.prov.find(pv => d3.geoContains(pv, centroid(f)));
+    });
+  }
+}
+
+// 점이 속한 영역 찾기 (해안 사진 대비: 없으면 가까운 영역)
+function findIn(features, ll, maxRad = 0.02){
+  const hit = features.find(f => d3.geoContains(f, ll));
+  if(hit) return hit;
+  let best = null, bd = Infinity;
+  for(const f of features){ const d = d3.geoDistance(ll, centroid(f)); if(d < bd){ bd = d; best = f; } }
+  return bd < maxRad ? best : null;
+}
+function chainOf(ll){
+  let c = findIn(S.world, ll, 0.015);
+  let pv = S.prov.length ? findIn(S.prov, ll, 0.006) : null;
+  if(!c && pv) c = S.korea;
+  if(!c) return [];
+  if(c !== S.korea || !pv) return [c];
+  const mu = S.muni.length ? findIn(S.muni.filter(x => x.parent === pv), ll, 0.004) : null;
+  return mu ? [c, pv, mu] : [c, pv];
+}
+
+/* ============================== 보기 계산 ============================== */
+function computeView(){
+  const located = S.photos.filter(p => p.chain.length);
+  S.photos.forEach(p => p.region = null);
+  if(!located.length) return { fit:{type:'FeatureCollection',features:S.world}, fills:[], sub:[] };
+  const chains = located.map(p => p.chain);
+  let d = 0;
+  while(chains.every(c => c.length > d && c[d] === chains[0][d])) d++;
+  let level, fitFeatures;
+  if(d === 0){                                  // 서로 다른 나라
+    level = 0;
+    fitFeatures = [...new Set(chains.map(c => c[0]))];
+  } else if(chains.some(c => c.length > d)){    // 같은 상위 영역 안의 서로 다른 하위 영역
+    level = d; fitFeatures = [chains[0][d-1]];
+  } else {                                      // 모두 같은 가장 깊은 영역
+    level = d - 1;
+    const r = chains[0][d-1];
+    fitFeatures = [r.parent && r.level > 0 ? r.parent : r];
+  }
+  const fillMap = new Map();
+  for(const p of located){                      // photos는 시간순 → 영역마다 가장 이른 사진
+    const r = p.chain[level]; if(!r) continue;
+    p.region = r;
+    if(!fillMap.has(r.key)) fillMap.set(r.key, { feature:r, photo:p });
+  }
+  const fills = [...fillMap.values()];
+  let sub = [];
+  const maxLv = Math.max(level, ...fitFeatures.map(f => f.level));
+  if(maxLv >= 1 || fitFeatures.includes(S.korea)) sub = sub.concat(S.prov);
+  if(level === 2 || fitFeatures.some(f => f.level >= 1)){
+    const parents = new Set(fills.map(f => f.feature.parent).concat(fitFeatures));
+    sub = sub.concat(S.muni.filter(m => parents.has(m.parent)));
+  }
+  return { fit:{type:'FeatureCollection',features:fitFeatures}, fills, sub };
+}
+
+/* ============================== 지도 그리기 ============================== */
+function mapSize(){ const r = $('map').getBoundingClientRect(); return { w: r.width || 800, h: r.height || 500 }; }
+function render(resetZoom = true){
+  if(!S.world.length) return;
+  S.view = computeView();
+  const { w, h } = mapSize(), pad = Math.min(w, h) * 0.06;
+  svg.attr('width', w).attr('height', h);
+  const proj = d3.geoMercator().fitExtent([[pad, pad], [w - pad, h - pad]], S.view.fit);
+  S.proj = proj; S.mapW = w; S.mapH = h;
+  const path = d3.geoPath(proj);
+  root.selectAll('*').remove();
+  const defs = root.append('defs');
+  S.view.fills.forEach((fl, i) => {
+    const id = 'clip' + i;
+    defs.append('clipPath').attr('id', id).append('path').attr('d', path(fl.feature));
+    const [[x0, y0], [x1, y1]] = path.bounds(fl.feature);
+    root.append('image').attr('href', fl.photo.url).attr('x', x0).attr('y', y0)
+      .attr('width', Math.max(1, x1 - x0)).attr('height', Math.max(1, y1 - y0))
+      .attr('preserveAspectRatio', 'xMidYMid slice').attr('clip-path', `url(#${id})`);
+  });
+  root.append('g').attr('class', 'world').selectAll('path').data(S.world).join('path').attr('d', path);
+  if(S.view.sub.length) root.append('g').attr('class', 'sub').selectAll('path').data(S.view.sub).join('path').attr('d', path);
+  root.append('g').attr('class', 'hl').selectAll('path').data(S.view.fills.map(f => f.feature)).join('path').attr('d', path);
+  if(resetZoom) svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+}
+$('zin').onclick  = () => svg.transition().duration(250).call(zoom.scaleBy, 1.5);
+$('zout').onclick = () => svg.transition().duration(250).call(zoom.scaleBy, 1/1.5);
+$('zfit').onclick = () => svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity);
+let rT; addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(() => render(false), 200); });
+
+// 위치 없는 사진: 지도 클릭으로 지정
+svg.on('click', ev => {
+  if(!S.pick || !S.proj) return;
+  const t = d3.zoomTransform($('map'));
+  const ll = S.proj.invert(t.invert(d3.pointer(ev, $('map'))));
+  const p = S.photos.find(x => x.id === S.pick);
+  setPick(null);
+  if(!p || !ll || ll.some(isNaN)) return;
+  p.lonlat = ll; p.chain = chainOf(ll); p.manual = true;
+  render(); renderList();
+});
+function setPick(id){ S.pick = id; $('map').classList.toggle('picking', !!id); $('banner').style.display = id ? 'block' : 'none'; }
+addEventListener('keydown', e => { if(e.key === 'Escape') setPick(null); });
+
+/* ============================== 업로드 & 리스트 ============================== */
+$('uploadBtn').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  if(!files.length) return;
+  setStatus(`사진 ${files.length}장 읽는 중…`);
+  for(const file of files){
+    let gps = null, meta = null;
+    try { gps = await exifr.gps(file); } catch {}
+    try { meta = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate']); } catch {}
+    const time = (meta && (meta.DateTimeOriginal || meta.CreateDate)) || new Date(file.lastModified);
+    const lonlat = gps && isFinite(gps.longitude) && isFinite(gps.latitude) ? [gps.longitude, gps.latitude] : null;
+    S.photos.push({ id: ++uid, file, url: URL.createObjectURL(file), time: new Date(time), lonlat,
+      chain: lonlat ? chainOf(lonlat) : [], caption: '' });
+  }
+  S.photos.sort((a, b) => a.time - b.time);
+  const missing = S.photos.filter(p => !p.lonlat).length;
+  setStatus(missing ? `위치 정보가 없는 사진 ${missing}장 — 카드의 '위치 지정'으로 지도에서 찍어주세요.` : '');
+  render(); renderList();
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtTime = d => isNaN(d) ? '' : d.toLocaleString('ko-KR', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+function placeName(p){ return p.chain.length ? p.chain.map(f => f.label).join(' › ') : ''; }
+
+function renderList(){
+  const list = $('list'); list.innerHTML = '';
+  $('empty').style.display = S.photos.length ? 'none' : 'block';
+  $('hint').style.display = S.photos.length ? 'none' : 'block';
+  $('hint').innerHTML = '사진을 업로드하면<br>찍은 곳의 외곽선 안이 사진으로 채워집니다';
+  S.photos.forEach((p, i) => {
+    const c = document.createElement('div'); c.className = 'card';
+    const loc = p.lonlat
+      ? `<b>${esc(placeName(p) || '지도 밖 위치')}</b>${p.manual ? ' (수동)' : ''}`
+      : `<span class="warn">위치 정보 없음</span>`;
+    c.innerHTML = `
+      <div class="thumb"><img src="${p.url}" alt=""><span class="idx">${i + 1}</span></div>
+      <div class="meta">${esc(fmtTime(p.time))}<br>${loc}</div>
+      <textarea placeholder="자막을 입력하세요 (TTS로 읽어줍니다)">${esc(p.caption)}</textarea>
+      <div class="acts">
+        <button class="btn pick">${p.lonlat ? '위치 수정' : '위치 지정'}</button>
+        <button class="btn del">삭제</button>
+      </div>`;
+    c.querySelector('textarea').oninput = e => { p.caption = e.target.value; };
+    c.querySelector('.pick').onclick = () => { setPick(p.id); $('mapWrap').scrollIntoView({ behavior:'smooth' }); };
+    c.querySelector('.del').onclick = () => {
+      URL.revokeObjectURL(p.url); S.photos = S.photos.filter(x => x !== p); render(); renderList();
+    };
+    list.appendChild(c);
+  });
+  $('makeBtn').disabled = !S.photos.length || S.busy;
+}
+function setStatus(t){ $('status').textContent = t; }
+function setProg(v){ const el = $('prog'); if(v == null){ el.hidden = true; return; } el.hidden = false; el.value = v; }
+
+/* ============================== TTS (브라우저 내 Supertonic 2) ============================== */
+let ttsPipe = null;
+async function getTTS(){
+  if(ttsPipe) return ttsPipe;
+  const { pipeline } = await import(TF_URL);
+  const progress_callback = x => {
+    if(x.status === 'progress' && x.total) setStatus(`음성 모델 다운로드 중… ${x.file || ''} ${Math.round(x.loaded / x.total * 100)}% (최초 1회, 이후 캐시)`);
+  };
+  const devices = ('gpu' in navigator) ? ['webgpu', 'wasm'] : ['wasm'];
+  let err;
+  for(const device of devices){
+    try { ttsPipe = await pipeline('text-to-speech', TTS_MODEL, { device, progress_callback }); return ttsPipe; }
+    catch(e){ err = e; console.warn('TTS', device, e); }
+  }
+  throw err;
+}
+function splitSentences(t){
+  return t.replace(/\s+/g, ' ').split(/(?<=[.!?…。])\s+/).map(s => s.trim()).filter(Boolean);
+}
+async function synth(text, voice, speed){
+  const pipe = await getTTS();
+  const parts = [], gap = 0.22;
+  let sr = 44100;
+  for(const s of splitSentences(text)){
+    const out = await pipe(`<ko>${s}</ko>`, { speaker_embeddings: VOICE_URL(voice), num_inference_steps: 8, speed });
+    sr = out.sampling_rate; parts.push(out.audio);
+  }
+  const g = Math.round(gap * sr);
+  const total = parts.reduce((a, p) => a + p.length, 0) + g * Math.max(0, parts.length - 1);
+  const data = new Float32Array(total); let o = 0;
+  parts.forEach((p, i) => { data.set(p, o); o += p.length + (i < parts.length - 1 ? g : 0); });
+  return { data, sr };
+}
+function resample(data, from, to){
+  if(from === to) return data;
+  const n = Math.round(data.length * to / from), out = new Float32Array(n), r = from / to;
+  for(let i = 0; i < n; i++){ const x = i * r, i0 = Math.floor(x), f = x - i0; const a = data[i0] || 0, b = data[i0 + 1] ?? a; out[i] = a + (b - a) * f; }
+  return out;
+}
+
+/* ============================== 영상용 그리기 ============================== */
+async function loadForVideo(p){           // 메모리 절약: 긴 변 1920으로 축소
+  const img = new Image(); img.src = p.url; await img.decode();
+  const s = Math.min(1, 1920 / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+// 사용자가 화면에서 맞춘 확대/이동을 영상 프레임에도 그대로 반영
+function videoProjection(){
+  const t = d3.zoomTransform($('map')), w = S.mapW, h = S.mapH;
+  const f = Math.max(VW / w, VH / h), ox = (VW - w * f) / 2, oy = (VH - h * f) / 2;
+  const [tx, ty] = S.proj.translate();
+  return d3.geoMercator().scale(S.proj.scale() * t.k * f).translate([(tx * t.k + t.x) * f + ox, (ty * t.k + t.y) * f + oy]);
+}
+function drawCover(ctx, img, x, y, w, h, z = 1, alpha = 1){
+  if(w < 1 || h < 1) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  const s = Math.max(w / img.width, h / img.height) * z, dw = img.width * s, dh = img.height * s;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  ctx.restore();
+}
+function buildStaticMap(proj, imgs){
+  const c = document.createElement('canvas'); c.width = VW; c.height = VH;
+  const ctx = c.getContext('2d'), path = d3.geoPath(proj, ctx);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VW, VH);
+  for(const fl of S.view.fills){
+    const img = imgs.get(fl.photo.id); if(!img) continue;
+    const [[x0, y0], [x1, y1]] = d3.geoPath(proj).bounds(fl.feature);
+    ctx.save(); ctx.beginPath(); path(fl.feature); ctx.clip();
+    drawCover(ctx, img, x0, y0, x1 - x0, y1 - y0);
+    ctx.restore();
+  }
+  const stroke = (feats, color, lw) => { ctx.beginPath(); feats.forEach(f => path(f)); ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke(); };
+  stroke(S.world, '#fff', 1.1);
+  if(S.view.sub.length) stroke(S.view.sub, 'rgba(255,255,255,.5)', 0.8);
+  stroke(S.view.fills.map(f => f.feature), '#fff', 2);
+  return c;
+}
+function wrapLines(ctx, text, maxW){
+  const lines = [];
+  for(const para of text.split('\n')){
+    let line = '';
+    for(const word of para.split(' ')){
+      const test = line ? line + ' ' + word : word;
+      if(ctx.measureText(test).width <= maxW){ line = test; continue; }
+      if(line) lines.push(line);
+      line = '';
+      for(const ch of word){            // 공백 없는 긴 문장은 글자 단위로
+        if(ctx.measureText(line + ch).width > maxW){ lines.push(line); line = ch; } else line += ch;
+      }
+    }
+    if(line) lines.push(line);
+  }
+  return lines;
+}
+function drawSubtitle(ctx, text){
+  if(!text.trim()) return;
+  ctx.save(); ctx.font = SUB_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const lines = wrapLines(ctx, text.trim(), VW * 0.82), lh = 48, px = 22, py = 14;
+  const bw = Math.max(...lines.map(l => ctx.measureText(l).width)) + px * 2;
+  const bh = lines.length * lh + py * 2, by = VH - 46 - bh;
+  ctx.fillStyle = '#000'; ctx.fillRect((VW - bw) / 2, by, bw, bh);
+  ctx.fillStyle = '#fff';
+  lines.forEach((l, i) => ctx.fillText(l, VW / 2, by + py + lh * i + lh / 2));
+  ctx.restore();
+}
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const lerpRect = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+
+/* ============================== 인코더 선택 ============================== */
+async function pickVideoCfg(){
+  for(const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42001f']){
+    const cfg = { codec, width: VW, height: VH, bitrate: 6_000_000, framerate: FPS, avc: { format: 'avc' } };
+    try { if((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch {}
+  }
+  return null;
+}
+async function pickAudioCfg(){
+  for(const [codec, sampleRate, mux] of [['mp4a.40.2', 48000, 'aac'], ['mp4a.40.2', 44100, 'aac'], ['opus', 48000, 'opus']]){
+    const cfg = { codec, sampleRate, numberOfChannels: 1, bitrate: 128000 };
+    try { if((await AudioEncoder.isConfigSupported(cfg)).supported) return { cfg, mux }; } catch {}
+  }
+  return null;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ============================== 제작 ============================== */
+$('makeBtn').onclick = () => produce().catch(e => { console.error(e); setStatus('제작 실패: ' + (e.message || e)); }).finally(() => {
+  S.busy = false; setProg(null); $('makeBtn').disabled = !S.photos.length; $('uploadBtn').disabled = false;
+});
+
+async function produce(){
+  if(!('VideoEncoder' in window)) throw new Error('이 브라우저는 영상 인코딩(WebCodecs)을 지원하지 않습니다. 데스크톱 Chrome/Edge를 사용해 주세요.');
+  S.busy = true; $('makeBtn').disabled = true; $('uploadBtn').disabled = true; setPick(null);
+  const photos = [...S.photos];              // 이미 촬영 시간순
+  const vcfg = await pickVideoCfg();
+  if(!vcfg) throw new Error('H.264 인코더를 찾지 못했습니다.');
+  const acfg = await pickAudioCfg();
+  const SR = acfg ? acfg.cfg.sampleRate : 48000;
+
+  // 1) 이미지 준비
+  setStatus('이미지 준비 중…'); setProg(0);
+  const imgs = new Map();
+  for(const p of photos) imgs.set(p.id, await loadForVideo(p));
+
+  // 2) TTS
+  const voice = $('voice').value, speed = +$('speed').value;
+  const voiceClips = new Map();
+  let ttsOK = true;
+  for(let i = 0; i < photos.length; i++){
+    const p = photos[i]; if(!p.caption.trim()) continue;
+    if(ttsOK){
+      try {
+        setStatus(`TTS 더빙 생성 중… (${i + 1}/${photos.length})`);
+        const { data, sr } = await synth(p.caption, voice, speed);
+        voiceClips.set(p.id, resample(data, sr, SR));
+      } catch(e){
+        console.error(e); ttsOK = false;
+        if(!confirm('음성 모델을 불러오지 못했습니다.\n음성 없이 자막만 넣어 영상을 만들까요?\n\n' + (e.message || e))) throw new Error('취소됨');
+      }
+    }
+    setProg((i + 1) / photos.length * 0.3);
+  }
+  if(!acfg && voiceClips.size) alert('이 브라우저에서 오디오 인코더를 찾지 못해 음성 없이 저장됩니다.');
+
+  // 3) 타임라인
+  await document.fonts.load(SUB_FONT);
+  const proj = videoProjection(), boundsPath = d3.geoPath(proj);
+  const staticMap = buildStaticMap(proj, imgs);
+  const full = [0, 0, VW, VH];
+  const regionRect = p => {
+    if(!p.region) return [VW / 2 - 40, VH / 2 - 30, 80, 60];
+    let [[x0, y0], [x1, y1]] = boundsPath.bounds(p.region);
+    x0 = Math.max(-VW, x0); y0 = Math.max(-VH, y0); x1 = Math.min(2 * VW, x1); y1 = Math.min(2 * VH, y1);
+    return [x0, y0, Math.max(4, x1 - x0), Math.max(4, y1 - y0)];
+  };
+  const segs = []; let t = 0;
+  const add = (type, dur, p) => { segs.push({ type, start: t, dur, p }); t += dur; };
+  add('map', T_INTRO);
+  const audioMarks = [];
+  for(const p of photos){
+    add('focus', T_FOCUS, p);
+    add('in', T_IN, p);
+    const clip = voiceClips.get(p.id);
+    const narr = clip ? clip.length / SR + 0.8 : (p.caption.trim() ? Math.max(2.5, p.caption.length * 0.17) : 2.5);
+    if(clip) audioMarks.push({ at: t + 0.35, clip });
+    add('narr', narr, p);
+    add('out', T_OUT, p);
+  }
+  add('map', T_OUTRO);
+  const total = t, nFrames = Math.ceil(total * FPS);
+
+  // 4) 오디오 트랙 합치기
+  const audio = new Float32Array(Math.ceil(total * SR));
+  for(const m of audioMarks){ const o = Math.round(m.at * SR); audio.set(m.clip.subarray(0, Math.max(0, audio.length - o)), o); }
+
+  // 5) 인코딩
+  const muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: { codec: 'avc', width: VW, height: VH, frameRate: FPS },
+    audio: acfg ? { codec: acfg.mux, numberOfChannels: 1, sampleRate: SR } : undefined,
+    fastStart: 'in-memory', firstTimestampBehavior: 'offset'
+  });
+  let encErr = null;
+  const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => encErr = e });
+  venc.configure(vcfg);
+  let aenc = null;
+  if(acfg){
+    aenc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: e => encErr = e });
+    aenc.configure(acfg.cfg);
+  }
+
+  const cv = $('out'); cv.width = VW; cv.height = VH;
+  const ctx = cv.getContext('2d');
+  let si = 0;
+  const renderFrame = time => {
+    while(si < segs.length - 1 && time >= segs[si].start + segs[si].dur) si++;
+    const s = segs[si], u = Math.min(1, (time - s.start) / s.dur), p = s.p, img = p && imgs.get(p.id);
+    ctx.drawImage(staticMap, 0, 0);
+    if(s.type === 'focus'){
+      ctx.save(); ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, VW, VH); ctx.restore();
+      const r = regionRect(p);
+      if(p.region){
+        ctx.save(); ctx.beginPath(); d3.geoPath(proj, ctx)(p.region); ctx.clip();
+        drawCover(ctx, img, ...r); ctx.restore();
+        ctx.beginPath(); d3.geoPath(proj, ctx)(p.region);
+        ctx.strokeStyle = `rgba(255,213,74,${0.5 + 0.5 * Math.sin(u * Math.PI * 2)})`; ctx.lineWidth = 3; ctx.stroke();
+      } else drawCover(ctx, img, ...r, 1, ease(u));
+    } else if(s.type === 'in'){
+      const e = ease(u);
+      drawCover(ctx, img, ...lerpRect(regionRect(p), full, e), 1, Math.min(1, 0.4 + u * 1.5));
+    } else if(s.type === 'narr'){
+      drawCover(ctx, img, ...full, 1 + KB_ZOOM * u);
+      drawSubtitle(ctx, p.caption);
+    } else if(s.type === 'out'){
+      const e = ease(u);
+      drawCover(ctx, img, ...lerpRect(full, regionRect(p), e), 1 + KB_ZOOM * (1 - e), 1 - u * u);
+    }
+  };
+
+  for(let i = 0; i < nFrames; i++){
+    if(encErr) throw encErr;
+    renderFrame(i / FPS);
+    const vf = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
+    venc.encode(vf, { keyFrame: i % (FPS * 2) === 0 });
+    vf.close();
+    while(venc.encodeQueueSize > 6) await sleep(2);
+    if(i % 10 === 0){ setStatus(`영상 렌더링 중… ${Math.round(i / nFrames * 100)}%`); setProg(0.3 + 0.65 * i / nFrames); await sleep(0); }
+  }
+  if(aenc){
+    const N = 4096;
+    for(let o = 0; o < audio.length; o += N){
+      const n = Math.min(N, audio.length - o);
+      const ad = new AudioData({ format: 'f32-planar', sampleRate: SR, numberOfFrames: n, numberOfChannels: 1,
+        timestamp: Math.round(o * 1e6 / SR), data: audio.slice(o, o + n) });
+      aenc.encode(ad); ad.close();
+    }
+  }
+  setStatus('마무리 중…');
+  await venc.flush(); if(aenc) await aenc.flush();
+  if(encErr) throw encErr;
+  muxer.finalize();
+  const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  const url = URL.createObjectURL(blob);
+  $('video').src = url; $('dl').href = url; $('result').style.display = 'block';
+  $('dl').click();
+  setProg(1);
+  setStatus(`완성! ${Math.round(total)}초 영상 (${(blob.size / 1048576).toFixed(1)}MB)${!ttsOK ? ' · 음성 없음' : ''}`);
+}
+
+/* ============================== 시작 ============================== */
+loadData().then(() => { render(); renderList(); })
+  .catch(e => { console.error(e); $('hint').textContent = '지도 데이터를 불러오지 못했습니다: ' + e.message; });
+</script>
+</body>
+</html>
